@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import re
+import tempfile
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -58,6 +59,12 @@ _BAD_NAME_FRAGMENTS = (
 # Per-model retry budget for OpenRouterToolNamer before falling through to
 # the next model in the priority list.
 _OPENROUTER_MAX_ATTEMPTS_PER_MODEL = 2
+_CODEX_LABEL_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {"name": {"type": "string"}},
+    "required": ["name"],
+    "additionalProperties": False,
+}
 
 
 class ToolNamer(Protocol):
@@ -74,6 +81,7 @@ class ToolNamerConfig:
     max_crop_px: int = 512
     openrouter_api_key: str | None = settings.openrouter_api_key
     openrouter_model: str = settings.openrouter_label_model
+    codex_model: str | None = None
 
     @classmethod
     def from_settings(cls) -> "ToolNamerConfig":
@@ -85,6 +93,7 @@ class ToolNamerConfig:
             max_crop_px=settings.tool_label_max_crop_px,
             openrouter_api_key=settings.openrouter_api_key,
             openrouter_model=settings.openrouter_label_model,
+            codex_model=settings.tool_label_codex_model,
         )
 
 
@@ -206,6 +215,39 @@ class OpenRouterToolNamer:
             await asyncio.sleep(delay)
 
 
+class CodexToolNamer:
+    """Names an isolated tool crop through the signed-in Codex account."""
+
+    def __init__(self, config: ToolNamerConfig):
+        self.config = config
+
+    async def name(self, image_png: bytes) -> str | None:
+        from openai_codex import AsyncCodex, ImageInput, Sandbox, TextInput
+
+        image_url = "data:image/png;base64," + base64.b64encode(image_png).decode("ascii")
+
+        async def _run(cwd: str) -> str | None:
+            async with AsyncCodex() as codex:
+                thread = await codex.thread_start(
+                    model=self.config.codex_model,
+                    cwd=cwd,
+                    sandbox=Sandbox.read_only,
+                    ephemeral=True,
+                    developer_instructions=(
+                        "Identify the pictured tool using only the supplied image. "
+                        "Do not use commands, inspect files, or call tools."
+                    ),
+                )
+                result = await thread.run(
+                    [TextInput(LABEL_PROMPT), ImageInput(image_url)],
+                    output_schema=_CODEX_LABEL_OUTPUT_SCHEMA,
+                )
+                return parse_label_response(result.final_response or "")
+
+        with tempfile.TemporaryDirectory(prefix="tracefinity-codex-") as cwd:
+            return await asyncio.wait_for(_run(cwd), timeout=self.config.timeout_seconds)
+
+
 def create_tool_namer(config: ToolNamerConfig | None = None) -> ToolNamer:
     config = config or ToolNamerConfig.from_settings()
     provider = config.provider.strip().lower()
@@ -215,6 +257,8 @@ def create_tool_namer(config: ToolNamerConfig | None = None) -> ToolNamer:
         return OllamaToolNamer(config)
     if provider == "openrouter":
         return OpenRouterToolNamer(config)
+    if provider == "codex":
+        return CodexToolNamer(config)
 
     logger.warning("unsupported tool naming provider '%s'; using fallback labels", provider)
     return FallbackToolNamer()

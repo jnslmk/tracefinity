@@ -111,7 +111,7 @@ PlacedTools sync with their library source on bin load (`GET /bins/{id}`) via `b
 
 Projects do not own tools or bins. Tools keep `project_ids`, bins keep `project_id`, and project health/repair endpoints keep those links consistent when records are renamed, deleted, or manually edited. Drawer placements follow the bin links: detaching or deleting a bin drops its placement from every sketch, and repair prunes placements for bins that are no longer linked.
 
-When `TOOL_LABEL_PROVIDER=ollama`, `tool_namer.py` runs after contour extraction for both AI tracing and manual mask upload, before the session is persisted. It crops each still-generic polygon from the corrected source image, masks everything outside the contour to white, asks the selected `ToolNamer` for one short JSON tool name, validates it, and writes the result back to `Polygon.label`. Naming is optional and non-fatal; unsupported providers, missing images, or naming failures keep the generic `tool N` labels.
+When `TOOL_LABEL_PROVIDER` is `ollama`, `openrouter`, or `codex`, `tool_namer.py` runs after contour extraction for both AI tracing and manual mask upload. It isolates each still-generic polygon crop and delegates naming to the selected `ToolNamer`; results pass existing label validation before being persisted. Naming is optional and non-fatal: failures keep the generic `tool N` labels. Codex requests use the signed-in account with read-only, ephemeral threads.
 
 ## Backend route helpers
 

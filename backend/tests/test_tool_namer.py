@@ -13,6 +13,7 @@ from app.config import ensure_user_dirs
 from app.main import app
 from app.models.schemas import Point, Polygon, Session
 from app.services.tool_namer import (
+    CodexToolNamer,
     FallbackToolNamer,
     OllamaToolNamer,
     OpenRouterToolNamer,
@@ -76,10 +77,42 @@ def test_create_tool_namer_dispatches_by_provider():
         create_tool_namer(ToolNamerConfig(provider="openrouter")),
         OpenRouterToolNamer,
     )
+    assert isinstance(create_tool_namer(ToolNamerConfig(provider="codex")), CodexToolNamer)
     assert isinstance(
         create_tool_namer(ToolNamerConfig(provider="unsupported")),
         FallbackToolNamer,
     )
+
+
+def test_codex_namer_uses_codex_subscription_and_validates_image_result(monkeypatch):
+    import openai_codex
+    from openai_codex import ImageInput, Sandbox, TextInput
+
+    class FakeThread:
+        async def run(self, inputs, *, output_schema):
+            assert isinstance(inputs[0], TextInput)
+            assert isinstance(inputs[1], ImageInput)
+            assert inputs[1].url == "data:image/png;base64,iVBORw=="
+            assert output_schema["required"] == ["name"]
+            return type("Result", (), {"final_response": '{"name":"Cordless Drill"}'})()
+
+    class FakeCodex:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def thread_start(self, **options):
+            assert options["model"] == "gpt-6-luna"
+            assert options["sandbox"] is Sandbox.read_only
+            assert options["ephemeral"] is True
+            return FakeThread()
+
+    monkeypatch.setattr(openai_codex, "AsyncCodex", lambda: FakeCodex())
+    namer = CodexToolNamer(ToolNamerConfig(provider="codex", codex_model="gpt-6-luna"))
+
+    assert asyncio.run(namer.name(b"\x89PNG")) == "cordless drill"
 
 
 class _FakeResponse:
