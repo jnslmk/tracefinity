@@ -488,7 +488,10 @@ class AITracer:
             return f.name
 
     async def _mask_via_openrouter(self, image_bytes: bytes, mime_type: str, prompt: str) -> bytes | None:
-        """call openrouter chat completions with image modality."""
+        """call the configured OpenRouter mask endpoint."""
+        if settings.openrouter_responses_url:
+            return await self._mask_via_openrouter_responses(image_bytes, mime_type, prompt)
+
         import base64
 
         import httpx
@@ -537,6 +540,70 @@ class AITracer:
                 return base64.b64decode(b64_data)
 
         return None
+
+    async def _mask_via_openrouter_responses(
+        self, image_bytes: bytes, mime_type: str, prompt: str
+    ) -> bytes | None:
+        import base64
+
+        import httpx
+
+        payload = {
+            "model": self.openrouter_image_model,
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}",
+                    },
+                ],
+            }],
+            "tools": [{"type": "image_generation", "model": "gpt-image-2.5-sunburst"}],
+            "tool_choice": "required",
+            "stream": True,
+        }
+        image_result = None
+        completed = False
+
+        async def _call():
+            nonlocal image_result, completed
+            async with httpx.AsyncClient(timeout=90) as client:
+                async with client.stream(
+                    "POST",
+                    settings.openrouter_responses_url,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {self.openrouter_key}",
+                        "Content-Type": "application/json",
+                    },
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if not data or data == "[DONE]":
+                            continue
+                        event = json.loads(data)
+                        if event.get("type") == "response.output_item.done":
+                            item = event.get("item", {})
+                            if item.get("type") == "image_generation_call":
+                                image_result = item.get("result")
+                        elif event.get("type") in {"error", "response.failed"}:
+                            error = event.get("error") or (event.get("response") or {}).get("error")
+                            raise RuntimeError(f"OpenRouter Responses request failed: {error or event}")
+                        elif event.get("type") == "response.completed":
+                            completed = True
+                            for item in event.get("response", {}).get("output", []):
+                                result = item.get("result")
+                                if item.get("type") == "image_generation_call" and result:
+                                    image_result = result
+
+        await asyncio.wait_for(_call(), timeout=90)
+        return base64.b64decode(image_result) if completed and image_result else None
+
 
     async def _mask_via_google(self, image_bytes: bytes, mime_type: str, prompt: str, api_key: str) -> bytes | None:
         """call google genai sdk directly."""

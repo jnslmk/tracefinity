@@ -17,7 +17,7 @@ TOOL_LABEL_MAX_CROP_PX=512
 
 ## OpenRouter naming
 
-For setups without a local Ollama server (or without GPU headroom to run one), naming can go through OpenRouter's chat completions API instead. Same per-crop flow as Ollama: one cropped image per still-generic polygon, same JSON label parsing and validation, generic label kept on failure. As with the remote (`gemini`) tracer, each cropped tool image is sent to OpenRouter's API to be named.
+For setups without a local Ollama server (or without GPU headroom to run one), naming can go through OpenRouter's chat completions API instead. Same per-crop flow as Ollama: one cropped image per still-generic polygon, same JSON label parsing and validation, generic label kept on failure.
 
 ```bash
 TOOL_LABEL_PROVIDER=openrouter
@@ -31,7 +31,8 @@ The endpoint is not tied to OpenRouter. Any OpenAI-compatible chat completions A
 OPENROUTER_URL=https://your-router.example/v1/chat/completions
 ```
 
-The same endpoint serves the `gemini` tracer when it runs through `OPENROUTER_API_KEY`. Mask generation there needs OpenRouter's image output format, which a plain OpenAI-compatible proxy may not provide.
+Mask generation uses the separate `OPENROUTER_RESPONSES_URL` endpoint when configured. It sends the mask prompt and source image through the Responses API with the `image_generation` tool; without that setting, the tracer keeps using the Chat Completions endpoint above.
+Set `OPENROUTER_IMAGE_MODEL` to a model available through that router; with the Responses endpoint enabled, the model must be routed to `image_generation`. The endpoint and image-model setting are not used for tool naming.
 
 `OPENROUTER_LABEL_MODEL` accepts a **comma-separated list** of models, tried in order:
 
@@ -53,6 +54,8 @@ This is aimed at OpenRouter's free-tier (`:free` suffix) models, which share a 2
 | `OPENROUTER_API_KEY` | unset | Required for the `openrouter` provider |
 | `OPENROUTER_URL` | `https://openrouter.ai/api/v1/chat/completions` | Chat completions endpoint for the `openrouter` provider. Any OpenAI-compatible API that accepts image inputs |
 | `OPENROUTER_LABEL_MODEL` | `google/gemini-2.0-flash-001` | Model, or comma-separated fallback list, for the `openrouter` provider |
+| `OPENROUTER_IMAGE_MODEL` | `google/gemini-3.1-flash-image-preview` | OpenRouter mask model; with Responses enabled, use a model routed to `image_generation` |
+| `OPENROUTER_RESPONSES_URL` | unset | Separate optional Responses API endpoint for mask generation; not used for tool naming |
 
 ## Behavior
 

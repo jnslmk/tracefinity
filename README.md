@@ -71,7 +71,9 @@ By default, Tracefinity uses [IS-Net](https://github.com/xuebinqin/DIS) for loca
 | `STL_RETENTION_HOURS` | `24` | Hours generated STL/3MF/zip exports are kept before a background sweep deletes them; a bin page regenerates them on the next visit or export download. `0` keeps exports forever |
 | `TRACEFINITY_ONNX_PROVIDER` | `auto` | Local ONNX provider: `auto`, `cuda`, or `cpu` |
 | `GEMINI_IMAGE_MODEL` | `gemini-3.1-flash-image-preview` | Gemini model for mask generation (see below) |
-| `TOOL_LABEL_PROVIDER` | `none` | Optional automatic tool naming: `ollama` (local vision model) or `openrouter` (any OpenAI-compatible endpoint via `OPENROUTER_URL`). See [Tool naming](docs/tool-naming.md) |
+| `OPENROUTER_RESPONSES_URL` | unset | Optional dedicated OpenRouter-compatible Responses API endpoint for mask generation; separate from Chat Completions tool naming |
+| `OPENROUTER_IMAGE_MODEL` | `google/gemini-3.1-flash-image-preview` | OpenRouter mask model; with the Responses endpoint, use a model routed to `image_generation` |
+| `TOOL_LABEL_PROVIDER` | `none` | Optional automatic tool naming: `ollama` (local vision model) or `openrouter` (`OPENROUTER_URL`, Chat Completions). See [Tool naming](docs/tool-naming.md) |
 | `SHOW_APP_VERSION` | `true` | Show the running version in the settings popover. Set to `false` to hide it |
 | `AUTH_MODE` | `native` | Authentication mode: `native` (cookie login), `proxy` (trusted reverse proxy, deprecated), or `open` (no authentication, trusted networks only). See [Authentication](docs/auth.md) |
 | `AUTH_SECRET` | auto-generated | Encrypts 2FA secrets at rest. Auto-generated into the storage volume when unset |

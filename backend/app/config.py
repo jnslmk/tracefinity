@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     google_api_key: Optional[str] = None
     openrouter_api_key: Optional[str] = None
     openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions"
+    openrouter_responses_url: Optional[str] = None
     openrouter_image_model: str = "google/gemini-3.1-flash-image-preview"
     openrouter_label_model: str = "google/gemini-2.0-flash-001"
     gemini_image_model: str = "gemini-3.1-flash-image-preview"
