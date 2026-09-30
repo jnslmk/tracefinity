@@ -2,7 +2,7 @@ name: Build Dev Image
 
 on:
   push:
-    branches: [main]
+    branches: [fork-main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

@@ -11,6 +11,43 @@
 
 <p align="center">Generate custom <a href="https://gridfinity.xyz/">gridfinity</a> bins from photos of your tools.</p>
 
+## Fork maintenance
+
+This fork deploys `origin/fork-main`, with `upstream/main` as its upstream
+source. `origin` is [jnslmk/tracefinity](https://github.com/jnslmk/tracefinity);
+`upstream` is [tracefinity/tracefinity](https://github.com/tracefinity/tracefinity).
+The fork's GitHub default branch is `fork-main`, which includes Responses API
+mask generation via `OPENROUTER_RESPONSES_URL`.
+
+For the solo-owned branch, start with a clean worktree and update from upstream:
+
+```bash
+git switch fork-main
+git fetch origin
+git fetch upstream
+git rebase upstream/main
+```
+
+Before pushing or publishing, run the existing verification commands in
+[CONTRIBUTING.md](CONTRIBUTING.md): `make lint`, backend
+`venv/bin/python -m pytest`, and frontend `pnpm test`. Also exercise a real
+Responses trace with the configured endpoint and image-generation model,
+checking the generated mask and resulting tool outline. After verification,
+use `git push --force-with-lease origin fork-main` **only while this branch has
+a single owner**. If shared, use `git merge upstream/main` instead of rebase
+and a normal `git push origin fork-main`; never rewrite shared history.
+
+The immutable fork release `v0.9.6-jnslmk.1` corresponds to
+`ghcr.io/jnslmk/tracefinity:0.9.6-jnslmk.1`. Publish a GitHub **prerelease** to
+trigger the release workflow; pushing the tag alone does not trigger it.
+Fork prereleases must not overwrite stable `latest` or major.minor image tags.
+Production remains explicitly pinned through `nas-ansible`; publishing a
+release does not deploy it. Automated updates require an explicit Renovate
+prerelease opt-in.
+
+The badges, hosted service links, and installation examples below refer to
+**upstream**, not this fork. Use the pinned fork image above for fork deployments.
+
 ## How It Works
 
 1. Place tools on A4, Letter, A3, or Tabloid paper (tools can overflow the edges)

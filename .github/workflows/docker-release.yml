@@ -40,10 +40,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=semver,pattern={{major}}.{{minor}},enable=${{ !github.event.release.prerelease && !contains(github.event.release.tag_name, '-') }}
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease && !contains(github.event.release.tag_name, '-') }}
 
       # single-arch build for the smoke check; APP_VERSION is arch-independent
       # and the push build below reuses the cached layers
