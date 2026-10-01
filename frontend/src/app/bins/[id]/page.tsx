@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useRouter, useParams } from 'next/navigation'
 import { BinEditor } from '@/components/BinEditor'
-import { BinConfigurator, calcMaxCutoutDepth } from '@/components/BinConfigurator'
+import { BinConfigurator, BinHeightPlanner, calcMaxCutoutDepth } from '@/components/BinConfigurator'
 import { BinPreview3D } from '@/components/BinPreview3D'
 import { ToolBrowser } from '@/components/ToolBrowser'
 import { getBin, updateBin, generateBinStl, getBinStlUrl, getBinZipUrl, getBinThreemfUrl, getBinInsertUrl, getImageUrl, listTools, updateTool } from '@/lib/api'
@@ -489,6 +489,12 @@ export default function BinPage() {
               <div className="flex justify-between"><span>Height</span><span>{(config.height_units * 7 + effectiveRimUnits * 7 + (config.stacking_lip ? 4.4 : 0)).toFixed(1)} mm</span></div>
             </div>
           </div>
+          <BinHeightPlanner binId={binId} config={config} placedTools={placedTools} onApply={async proposal => {
+            if (!proposal.bin_config || !proposal.placed_tools) return
+            setConfig(proposal.bin_config)
+            setPlacedTools(proposal.placed_tools)
+            lastGenerateRef.current = ''
+          }} />
         </div>
 
         {/* export buttons */}

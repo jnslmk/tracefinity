@@ -5,9 +5,10 @@ import pytest
 import trimesh
 from pydantic import ValidationError
 
-from app.models.schemas import GenerateRequest
-from app.services.polygon_scaler import ScaledFingerHole, ScaledPolygon
+from app.models.schemas import BinConfig, BinModel, GenerateRequest, PlacedTool, Tool
+from app.services.polygon_scaler import PolygonScaler, ScaledFingerHole, ScaledPolygon
 from app.services.stl_generator_manifold import ManifoldSTLGenerator
+from app.services.toolbox_planning import assess_bin
 
 
 def _surface_z(mesh, x=0, y=0):
@@ -85,3 +86,89 @@ def test_shallow_depth_round_trips_through_saved_config(tmp_path):
 def test_depth_schema_rejects_out_of_range_values(depth):
     with pytest.raises(ValidationError, match="cutout depth must be between"):
         GenerateRequest(cutout_depth=depth)
+
+
+@pytest.mark.parametrize("height,depth,override,insert,rim,lip", [
+    (4, 20, None, 0, 0, True),
+    (4, 20, 8, 0, 0, True),
+    (2, 200, None, 0, 0, True),
+    (1, 200, 200, 1, 0, True),
+    (4, 20, 8, 2, 0, True),
+    (4, 20, 8, 2, 3, True),
+    (4, 20, 8, 0, 3, False),
+])
+def test_planning_envelope_resting_height_matches_printed_surfaces(tmp_path, height, depth, override, insert, rim, lip):
+    config = GenerateRequest(grid_x=1, grid_y=1, height_units=height, cutout_depth=depth,
+                             insert_enabled=insert > 0, insert_height=insert or 1,
+                             rim_units=rim, stacking_lip=lip, magnets=False)
+    mesh = _generate(tmp_path, config, override)
+    points = [{"x": 11, "y": 11}, {"x": 31, "y": 11}, {"x": 31, "y": 31}, {"x": 11, "y": 31}]
+    tool = Tool(id="tool", name="Square", points=points, thickness_mm=12)
+    bin_data = BinModel(id="bin", bin_config=BinConfig.model_validate(config.model_dump()),
+                        placed_tools=[PlacedTool(id="placement", tool_id=tool.id, name=tool.name,
+                                                 points=points, depth_override=override)])
+    assessment = assess_bin(bin_data, {tool.id: tool}, gap=1)
+    insert_surface = 0
+    if insert:
+        insert_path = tmp_path / "insert.stl"
+        poly = ScaledPolygon("square", [(p["x"], p["y"]) for p in points], "Square", depth_override=override)
+        assert ManifoldSTLGenerator().generate_insert([poly], config, str(insert_path), -21, -21)
+        insert_mesh = trimesh.load_mesh(insert_path)
+        insert_surface = insert_mesh.bounds[1, 2] - insert_mesh.bounds[0, 2]
+    rest = _surface_z(mesh) + insert_surface
+    assert assessment["envelopes"][0]["resting_z_mm"] == pytest.approx(rest)
+    assert assessment["envelopes"][0]["top_mm"] == pytest.approx(rest + 12)
+    assert assessment["external_height_mm"] == pytest.approx(mesh.bounds[1, 2])
+    if not lip:
+        assert assessment["status"] == "invalid"
+
+
+@pytest.mark.parametrize("rim,half_grid,wide", [(0, False, False), (1, False, False), (3, False, False), (0, True, False), (2, True, False), (0, False, True)])
+def test_planned_mating_position_contacts_generated_surface_without_intersection(tmp_path, rim, half_grid, wide):
+    config = GenerateRequest(grid_x=1, grid_y=1, height_units=4, rim_units=rim,
+                             half_grid_base=half_grid, cutout_depth=8, cutout_clearance=.2, magnets=False)
+    points = [(3, 3), (39, 3), (39, 39), (3, 39)] if wide else [(11, 11), (31, 11), (31, 31), (11, 31)]
+    poly = ScaledPolygon("tool", points, "Tool")
+    prepared = PolygonScaler().prepare_for_generation(poly, config.cutout_clearance, smoothed=False)
+    generator = ManifoldSTLGenerator()
+    lower, _ = generator.generate_bin([prepared], config, str(tmp_path / "lower.stl"))
+    upper, _ = generator.generate_bin([], config, str(tmp_path / "upper.stl"))
+    tool = Tool(id="tool", name="Tool", points=[{"x": x, "y": y} for x, y in poly.points_mm], thickness_mm=12, smoothed=False)
+    data = BinModel(id="bin", bin_config=BinConfig.model_validate(config.model_dump()), placed_tools=[
+        PlacedTool(id="p", tool_id=tool.id, name=tool.name, points=tool.points),
+    ])
+    assessment = assess_bin(data, {tool.id: tool}, gap=.5)
+    z = assessment["stack_increment_mm"]
+    # Independent solids establish the actual assembly: one cannot lower the
+    # upper bin further without intersecting the printed floor or mating collar.
+    assert (lower ^ upper.translate((0, 0, z))).volume() == pytest.approx(0, abs=1e-4)
+    assert (lower ^ upper.translate((0, 0, z - .02))).volume() > 1e-4
+    lower_mesh = trimesh.load_mesh(tmp_path / "lower.stl")
+    upper_mesh = trimesh.load_mesh(tmp_path / "upper.stl")
+    underside = upper_mesh.bounds[0, 2] + z
+    tool_top = _surface_z(lower_mesh) + tool.thickness_mm
+    assert assessment["envelopes"][0]["clearance_mm"] == pytest.approx(underside - tool_top - .5)
+    assert z + upper_mesh.bounds[1, 2] != pytest.approx(assessment["external_height_mm"] * 2)
+
+
+@pytest.mark.parametrize("half_grid", [False, True])
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_raised_rectangular_mating_matches_rotated_generated_upper_base(tmp_path, half_grid, rotation):
+    lower_config = GenerateRequest(grid_x=2, grid_y=1, height_units=4, rim_units=1,
+                                   half_grid_base=half_grid, magnets=False, cutout_depth=8, cutout_clearance=.2)
+    upper_config = lower_config.model_copy(update={"grid_x": 1, "grid_y": 2}) if rotation in (90, 270) else lower_config
+    raw = ScaledPolygon("tool", [(32, 11), (52, 11), (52, 31), (32, 31)], "Tool")
+    prepared = PolygonScaler().prepare_for_generation(raw, lower_config.cutout_clearance, smoothed=False)
+    lower, _ = ManifoldSTLGenerator().generate_bin([prepared], lower_config, str(tmp_path / "lower.stl"))
+    upper, _ = ManifoldSTLGenerator().generate_bin([], upper_config, str(tmp_path / "upper.stl"))
+    upper = upper.rotate((0, 0, -rotation))
+    tool = Tool(id="tool", name="Tool", points=[{"x": x, "y": y} for x, y in raw.points_mm], thickness_mm=5, smoothed=False)
+    data = BinModel(id="bin", bin_config=BinConfig.model_validate(lower_config.model_dump()), placed_tools=[
+        PlacedTool(id="p", tool_id=tool.id, name=tool.name, points=tool.points),
+    ])
+    assessment = assess_bin(data, {tool.id: tool}, upper_config=BinConfig.model_validate(upper_config.model_dump()),
+                            relative_rotation=rotation)
+    z = assessment["stack_increment_mm"]
+    assert assessment["status"] == "verified"
+    assert (lower ^ upper.translate((0, 0, z))).volume() < 1e-4
+    assert (lower ^ upper.translate((0, 0, z-.02))).volume() > 1e-4

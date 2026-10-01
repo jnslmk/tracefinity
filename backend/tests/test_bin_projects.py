@@ -1,4 +1,6 @@
+import manifold3d as mf
 import pytest
+import trimesh
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -14,15 +16,20 @@ from app.models.schemas import (
     BinProjectCreateRequest,
     BinProjectToolsRequest,
     BinProjectUpdateRequest,
+    GenerateRequest,
     PlacedTool,
     ProjectBinPlacement,
     ProjectSketch,
+    TextLabel,
     Tool,
 )
 from app.services.bin_store import BinStore
+from app.services.polygon_scaler import PolygonScaler, ScaledFingerHole, ScaledPolygon
 from app.services.project_service import project_health, project_status, repair_project_links
 from app.services.project_store import ProjectStore
+from app.services.stl_generator_manifold import ManifoldSTLGenerator
 from app.services.tool_store import ToolStore
+from tests.test_max_cutout_depth import _surface_z
 
 
 def test_old_project_records_get_defaults():
@@ -420,11 +427,15 @@ def test_sketch_layout_round_trips_through_patch(tmp_path, monkeypatch):
 
     assert resp.status_code == 200
     assert resp.json()["target_grid_x"] == 6
-    assert resp.json()["bin_layout"] == [
-        {"id": "placement-1", "bin_id": bin_data["id"], "x": 1.5, "y": 2.0, "rotation": 90, "color": "#4ade80"}
-    ]
+    placement = resp.json()["bin_layout"][0]
+    assert placement["id"] == "placement-1" and placement["bin_id"] == bin_data["id"]
+    assert (placement["x"], placement["y"], placement["rotation"]) == (1.5, 2, 90)
+    assert placement["color"] == "#4ade80"
     stored = client.get(f"/api/bin-projects/{project['id']}").json()["sketches"][0]
     assert stored["bin_layout"][0]["x"] == 1.5
+    assert stored["bin_layout"][0]["id"] == placement["id"]
+    assert (stored["bin_layout"][0]["y"], stored["bin_layout"][0]["rotation"]) == (2, 90)
+    assert stored["bin_layout"][0]["color"] == "#4ade80"
     assert stored["name"] == "Top"
 
 
@@ -597,3 +608,453 @@ def test_rejected_sketch_update_leaves_nothing_behind(tmp_path, monkeypatch):
     assert stored["name"] == "Top"
     assert stored["target_grid_x"] == 4
     assert stored["bin_layout"] == []
+
+
+def _toolbox_workflow(tmp_path, monkeypatch, thickness=10):
+    client = _api_client(tmp_path, monkeypatch)
+    _seed_tool("tool-1")
+    assert client.put("/api/tools/tool-1", json={"thickness_mm": thickness}).status_code == 200
+    project = client.post("/api/bin-projects", json={"name": "Toolbox", "tool_ids": ["tool-1"]}).json()
+    bins = [client.post("/api/bins", json={
+        "project_id": project["id"], "tool_ids": ["tool-1"],
+        "bin_config": {"grid_x": 1, "grid_y": 1, "height_units": 4, "magnets": False},
+    }).json() for _ in range(2)]
+    sketch = client.post(f"/api/bin-projects/{project['id']}/sketches", json={
+        "name": "Measured toolbox", "container_width_mm": 100, "container_depth_mm": 84,
+        "container_height_mm": 70, "safety_clearance_mm": 1,
+    }).json()
+    url = f"/api/bin-projects/{project['id']}/sketches/{sketch['id']}"
+    layout = [{"id": "lower", "bin_id": bins[0]["id"], "x": 0, "y": 0},
+              {"id": "upper", "bin_id": bins[1]["id"], "x": 0, "y": 0, "support_id": "lower"}]
+    assert client.patch(url, json={"bin_layout": layout}).status_code == 200
+    return client, project, bins, url, layout
+
+
+def _printed_bin(client, bin_id, tmp_path):
+    data = client.get(f"/api/bins/{bin_id}").json()
+    _, tools, _ = routes.get_stores("default")
+    scaler = PolygonScaler()
+    polygons = []
+    for placed in data["placed_tools"]:
+        source = tools.get(placed["tool_id"])
+        raw = ScaledPolygon(
+            placed["id"], [(p["x"], p["y"]) for p in placed["points"]], placed["name"],
+            [ScaledFingerHole.from_finger_hole(h) for h in PlacedTool.model_validate(placed).finger_holes],
+            [[(p["x"], p["y"]) for p in ring] for ring in placed["interior_rings"]],
+            depth_override=placed["depth_override"],
+        )
+        polygons.append(scaler.prepare_for_generation(
+            raw, data["bin_config"]["cutout_clearance"], smoothed=source.smoothed, smooth_level=source.smooth_level,
+        ))
+    config = GenerateRequest.model_validate({
+        **data["bin_config"], "text_labels": data["bin_config"]["text_labels"] + data["text_labels"],
+    })
+    path = tmp_path / f"printed-{bin_id}.stl"
+    body, text = ManifoldSTLGenerator().generate_bin(polygons, config, str(path))
+    return body + text if text else body, trimesh.load_mesh(path)
+
+
+def test_tool_measurement_preserves_omission_clears_null_and_survives_reload(tmp_path, monkeypatch):
+    client = _api_client(tmp_path, monkeypatch)
+    _seed_tool("tool-1")
+    assert client.get("/api/tools/tool-1").json()["thickness_mm"] is None
+    assert client.put("/api/tools/tool-1", json={"thickness_mm": 12.5}).status_code == 200
+    assert client.put("/api/tools/tool-1", json={"name": "Measured"}).status_code == 200
+    assert client.get("/api/tools").json()["tools"][0]["thickness_mm"] == 12.5
+    routes._store_cache.clear()
+    assert client.get("/api/tools/tool-1").json()["thickness_mm"] == 12.5
+    assert client.put("/api/tools/tool-1", json={"thickness_mm": None}).status_code == 200
+    routes._store_cache.clear()
+    assert client.get("/api/tools/tool-1").json()["thickness_mm"] is None
+    for value in ("0", "-1", "NaN", "Infinity"):
+        assert client.put("/api/tools/tool-1", content='{"thickness_mm":' + value + '}',
+                          headers={"Content-Type": "application/json"}).status_code == 422
+    assert client.get("/api/tools/tool-1").json()["thickness_mm"] is None
+
+
+def test_toolbox_fit_persists_inputs_not_assessments_and_counts_floor_union(tmp_path, monkeypatch):
+    client, project, bins, url, layout = _toolbox_workflow(tmp_path, monkeypatch)
+    result = client.post(url + "/assessment", json={}).json()
+    assert result["status"] == "verified"
+    assert result["occupied_floor_units"] == 1
+    assert sum(r["area_units"] for r in result["free_regions"]) == 3
+    assert result["residual_width_mm"] == 16
+    assert result["unhoused_tool_ids"] == []
+    assert result["placements"][1]["z_mm"] == 28
+    assert result["stacks"][0]["headroom_mm"] == pytest.approx(8.6)
+    routes._project_store_cache.clear()
+    routes._store_cache.clear()
+    saved = client.get(f"/api/bin-projects/{project['id']}").json()["sketches"][0]
+    assert saved["container_height_mm"] == 70
+    assert saved["bin_layout"][1]["support_id"] == "lower"
+    assert "status" not in saved
+    assert "z_mm" not in saved["bin_layout"][1]
+    assert client.post(url + "/assessment", json={}).json()["status"] == "verified"
+    assert client.patch(url, json={"container_width_mm": 41}).status_code == 200
+    invalid = client.post(url + "/assessment", json={}).json()
+    assert any(v["code"] == "boundary" for v in invalid["violations"])
+    assert len(client.get(f"/api/bin-projects/{project['id']}").json()["sketches"][0]["bin_layout"]) == 2
+    assert client.patch(url, json={"container_width_mm": None, "container_depth_mm": None, "container_height_mm": None}).status_code == 200
+    assert client.post(url + "/assessment", json={}).json()["status"] == "uncertain"
+    assert client.post(url + "/assessment", json={}).json()["placements"][1]["z_mm"] == 28
+
+
+@pytest.mark.parametrize("offset,status", [(-0.01, "invalid"), (0, "verified"), (0.01, "verified")])
+def test_toolbox_ceiling_threshold_uses_generated_external_height(tmp_path, monkeypatch, offset, status):
+    client, _, bins, url, _ = _toolbox_workflow(tmp_path, monkeypatch)
+    for bin_data in bins:
+        config = {**bin_data["bin_config"], "height_units": 5}
+        assert client.put(f"/api/bins/{bin_data['id']}", json={"bin_config": config}).status_code == 200
+    # Two nominal 5u bodies sum to 70mm but their assembled exterior reaches 74.4mm.
+    assert client.post(url + "/assessment", json={}).json()["status"] == "invalid"
+    result = client.post(url + "/assessment", json={"container_height_mm": 75.4 + offset}).json()
+    assert result["status"] == status
+    assert result["stacks"][0]["headroom_mm"] == pytest.approx(offset)
+
+
+@pytest.mark.parametrize("offset,status", [(-0.01, "verified"), (0, "verified"), (0.01, "invalid")])
+def test_toolbox_upper_bin_tool_clearance_threshold(tmp_path, monkeypatch, offset, status):
+    client, _, _, url, _ = _toolbox_workflow(tmp_path, monkeypatch, thickness=19 + offset)
+    # Effective default pocket depth is 20mm; a configured 1mm gap leaves 19mm.
+    result = client.post(url + "/assessment", json={}).json()
+    assert result["status"] == status
+    assert result["placements"][0]["clearance_mm"] == pytest.approx(-offset)
+
+
+def test_missing_measurements_do_not_hide_known_ceiling_failure_or_unhoused_tools(tmp_path, monkeypatch):
+    client, project, bins, url, _ = _toolbox_workflow(tmp_path, monkeypatch, thickness=100)
+    _seed_tool("unknown")
+    client.post(f"/api/bin-projects/{project['id']}/tools", json={"tool_ids": ["unknown"]})
+    extra = client.post("/api/bins", json={"project_id": project["id"], "tool_ids": ["unknown"]}).json()
+    result = client.post(url + "/assessment", json={}).json()
+    assert result["status"] == "invalid"
+    assert result["unhoused_tool_ids"] == ["unknown"]  # linked elsewhere is not housed
+    assert any(v["code"] == "ceiling" for v in result["violations"])
+    placed = bins[1]["placed_tools"] + extra["placed_tools"]
+    assert client.put(f"/api/bins/{bins[1]['id']}", json={"placed_tools": placed}).status_code == 200
+    result = client.post(url + "/assessment", json={}).json()
+    assert result["status"] == "invalid"
+    assert result["missing_tool_ids"] == ["unknown"]
+    assert any(v["code"] == "ceiling" for v in result["violations"])
+    assert client.put("/api/tools/tool-1", json={"thickness_mm": 5}).status_code == 200
+    assert client.post(url + "/assessment", json={}).json()["status"] == "uncertain"
+
+
+def test_invalid_support_graph_is_rejected_without_replacing_saved_work(tmp_path, monkeypatch):
+    client, project, bins, url, layout = _toolbox_workflow(tmp_path, monkeypatch)
+    other = client.post(f"/api/bin-projects/{project['id']}/sketches", json={}).json()
+    for bad in (
+        [{**layout[0], "support_id": "upper"}, layout[1]],
+        [layout[0], {**layout[1], "support_id": "absent"}],
+        [layout[0], layout[1], {"id": "copy", "bin_id": bins[1]["id"], "support_id": "lower"}],
+    ):
+        assert client.patch(url, json={"bin_layout": bad}).status_code == 400
+    assert client.patch(url.rsplit("/", 1)[0] + "/" + other["id"], json={"bin_layout": [layout[1]]}).status_code == 400
+    saved = client.get(f"/api/bin-projects/{project['id']}").json()["sketches"][0]["bin_layout"]
+    assert [p["id"] for p in saved] == ["lower", "upper"]
+    assert saved[1]["support_id"] == "lower"
+
+
+def test_stack_actions_move_rotate_reorder_remove_and_keep_library_bins(tmp_path, monkeypatch):
+    client, project, bins, url, layout = _toolbox_workflow(tmp_path, monkeypatch)
+    # A root-only API edit carries its unchanged descendants.
+    moved = client.patch(url, json={"bin_layout": [{**layout[0], "x": 1, "rotation": 90}, layout[1]]}).json()
+    assert [(p["x"], p["rotation"]) for p in moved["bin_layout"]] == [(1, 90), (1, 90)]
+    reordered = client.post(url + "/placements/lower/stack-action", json={"action": "move_up"}).json()
+    assert next(p for p in reordered["bin_layout"] if p["id"] == "upper")["support_id"] is None
+    assert next(p for p in reordered["bin_layout"] if p["id"] == "lower")["support_id"] == "upper"
+    removed = client.post(url + "/placements/upper/stack-action", json={"action": "remove_reconnect"}).json()
+    assert [p["id"] for p in removed["bin_layout"]] == ["lower"]
+    assert removed["bin_layout"][0]["support_id"] is None
+    assert all(client.get(f"/api/bins/{b['id']}").status_code == 200 for b in bins)
+    copy_layout = removed["bin_layout"] + [{"id": "copy", "bin_id": bins[0]["id"], "x": 0, "y": 0}]
+    client.patch(url, json={"bin_layout": copy_layout})
+    stacked = client.post(url + "/placements/copy/stack-action", json={"action": "stack_on", "support_id": "lower"}).json()
+    assert next(p for p in stacked["bin_layout"] if p["id"] == "copy")["support_id"] == "lower"
+    deleted = client.post(url + "/placements/lower/stack-action", json={"action": "remove_substack"}).json()
+    assert deleted["bin_layout"] == []
+    assert client.get(f"/api/bin-projects/{project['id']}").json()["bin_ids"] == [b["id"] for b in bins]
+
+
+@pytest.mark.parametrize("config_change", [
+    {"stacking_lip": False},
+    {"partial_bins": True, "grid_x": 2, "partial_bins_values": [True, False]},
+])
+def test_unsupported_interfaces_cannot_be_verified_or_applied(tmp_path, monkeypatch, config_change):
+    client, _, bins, url, _ = _toolbox_workflow(tmp_path, monkeypatch)
+    client.put(f"/api/bins/{bins[0]['id']}", json={"bin_config": {**bins[0]["bin_config"], **config_change}})
+    result = client.post(url + "/assessment", json={}).json()
+    assert result["status"] == "invalid"
+    assert any(v["code"] == "support" for v in result["violations"])
+    # Removing an affected sub-stack remains possible even with a broken interface.
+    assert client.post(url + "/placements/upper/stack-action", json={"action": "remove_substack"}).status_code == 200
+    independent = [{"id": "new", "bin_id": bins[1]["id"], "x": 1, "y": 0}, {"id": "lower", "bin_id": bins[0]["id"]}]
+    assert client.patch(url, json={"bin_layout": independent}).status_code == 200
+    assert client.post(url + "/placements/new/stack-action", json={"action": "stack_on", "support_id": "lower"}).status_code == 400
+
+
+def test_rotated_matching_rectangles_and_detaching_support_repairs_descendants(tmp_path, monkeypatch):
+    client, project, bins, url, layout = _toolbox_workflow(tmp_path, monkeypatch)
+    client.put(f"/api/bins/{bins[0]['id']}", json={"bin_config": {**bins[0]["bin_config"], "grid_x": 2, "grid_y": 1}})
+    client.put(f"/api/bins/{bins[1]['id']}", json={"bin_config": {**bins[1]["bin_config"], "grid_x": 1, "grid_y": 2}})
+    client.patch(url, json={"bin_layout": [layout[0], {**layout[1], "rotation": 90}]})
+    assert client.post(url + "/assessment", json={}).json()["status"] == "verified"
+    client.delete(f"/api/bin-projects/{project['id']}/bins/{bins[0]['id']}")
+    assert client.get(f"/api/bin-projects/{project['id']}").json()["sketches"][0]["bin_layout"] == []
+    assert client.get(f"/api/bins/{bins[1]['id']}").status_code == 200
+
+
+def test_height_proposals_are_inspectable_explicit_and_reassess_shared_plans(tmp_path, monkeypatch):
+    client, _, bins, url, _ = _toolbox_workflow(tmp_path, monkeypatch, thickness=30)
+    target = bins[0]
+    override = [{**p, "depth_override": 8} for p in target["placed_tools"]]
+    client.put(f"/api/bins/{target['id']}", json={"placed_tools": override})
+    before = client.get(f"/api/bins/{target['id']}").json()
+    proposals = client.get(f"/api/bins/{target['id']}/height-planning?safety_clearance_mm=1").json()
+    assert client.get(f"/api/bins/{target['id']}").json()["bin_config"] == before["bin_config"]
+    deeper, rim = proposals["alternatives"]
+    assert deeper["complete"] and rim["complete"]
+    assert deeper["bin_config"]["height_units"] == 6
+    assert deeper["override_changes"][0]["from_mm"] == 8
+    assert deeper["override_changes"][0]["to_mm"] == 31
+    assert rim["placed_tools"][0]["depth_override"] == 8
+    assert rim["bin_config"]["height_units"] == 4
+    assert rim["bin_config"]["rim_units"] == 4
+    assert client.put(f"/api/bins/{target['id']}", json={
+        "bin_config": deeper["bin_config"], "placed_tools": deeper["placed_tools"],
+    }).status_code == 200
+    assessment = client.post(url + "/assessment", json={}).json()
+    assert assessment["placements"][0]["clearance_mm"] >= 0
+    assert assessment["placements"][1]["z_mm"] == 42
+    assert any(v["code"] == "ceiling" for v in assessment["violations"])
+    client.put("/api/tools/tool-1", json={"thickness_mm": None})
+    incomplete = client.get(f"/api/bins/{target['id']}/height-planning").json()
+    assert all(not p["complete"] for p in incomplete["alternatives"])
+    client.put("/api/tools/tool-1", json={"thickness_mm": 1000})
+    impossible = client.get(f"/api/bins/{target['id']}/height-planning").json()
+    assert all(p["bin_config"] is None and p["reason"] for p in impossible["alternatives"])
+
+
+@pytest.mark.parametrize("field", ["container_width_mm", "container_depth_mm", "container_height_mm", "safety_clearance_mm"])
+def test_invalid_container_measurement_keeps_saved_layout(tmp_path, monkeypatch, field):
+    client, project, _, url, _ = _toolbox_workflow(tmp_path, monkeypatch)
+    assert client.patch(url, json={field: -1}).status_code == 422
+    assert client.patch(url, content='{\"' + field + '\":NaN}', headers={"Content-Type": "application/json"}).status_code == 422
+    assert len(client.get(f"/api/bin-projects/{project['id']}").json()["sketches"][0]["bin_layout"]) == 2
+
+
+def test_wide_pocket_height_minimum_accounts_for_base_descending_into_pocket(tmp_path, monkeypatch):
+    client, _, bins, url, _ = _toolbox_workflow(tmp_path, monkeypatch, thickness=12)
+    assert client.put("/api/tools/tool-1", json={
+        "points": [{"x": x, "y": y} for x, y in [(-18, -18), (18, -18), (18, 18), (-18, 18)]],
+        "smoothed": False,
+    }).status_code == 200
+    for data in bins:
+        assert client.put(f"/api/bins/{data['id']}", json={"placed_tools": [
+            {**placed, "rotation": 0, "points": [{"x": x, "y": y} for x, y in [(3, 3), (39, 3), (39, 39), (3, 39)]]}
+            for placed in data["placed_tools"]
+        ]}).status_code == 200
+    current = client.post(url + "/assessment", json={}).json()
+    lower, _ = _printed_bin(client, bins[0]["id"], tmp_path)
+    upper, upper_mesh = _printed_bin(client, bins[1]["id"], tmp_path)
+    z = current["placements"][1]["z_mm"]
+    assert (lower ^ upper.translate((0, 0, z))).volume() < 1e-4
+    assert (lower ^ upper.translate((0, 0, z-.02))).volume() > 1e-4
+    target = bins[0]["id"]
+    proposal = client.get(f"/api/bins/{target}/height-planning?safety_clearance_mm=1").json()["alternatives"][0]
+    assert proposal["bin_config"]["height_units"] == 3
+    assert client.put(f"/api/bins/{target}", json={
+        "bin_config": proposal["bin_config"], "placed_tools": proposal["placed_tools"],
+    }).status_code == 200
+    fitted = client.post(url + "/assessment", json={}).json()
+    assert fitted["status"] == "verified"
+    lower, lower_mesh = _printed_bin(client, target, tmp_path)
+    z = fitted["placements"][1]["z_mm"]
+    assert (lower ^ upper.translate((0, 0, z))).volume() < 1e-4
+    assert (lower ^ upper.translate((0, 0, z-.02))).volume() > 1e-4
+    clearance = upper_mesh.bounds[0, 2] + z - _surface_z(lower_mesh) - 12 - 1
+    assert clearance == pytest.approx(0, abs=1e-5)
+    assert fitted["placements"][0]["clearance_mm"] == pytest.approx(clearance, abs=1e-5)
+    shallower = {**proposal["bin_config"], "cutout_depth": proposal["bin_config"]["cutout_depth"]-.01}
+    probe = client.post(f"/api/bins/{target}/height-planning?safety_clearance_mm=1", json={
+        "bin_config": shallower, "placed_tools": proposal["placed_tools"],
+    }).json()["assessment"]
+    assert any(v["code"] == "tool_clearance" and v["clearance_mm"] < 0 for v in probe["violations"])
+
+
+@pytest.mark.parametrize("offset", [-.01, 0, .01])
+def test_known_insert_ceiling_collision_with_missing_tool_thickness(tmp_path, monkeypatch, offset):
+    client, _, bins, url, layout = _toolbox_workflow(tmp_path, monkeypatch, thickness=None)
+    target = bins[0]
+    # A shallow pocket makes a supported insert extend above the printed bin.
+    config = {**target["bin_config"], "height_units": 1, "insert_enabled": True, "insert_height": 5}
+    placed = [{**p, "depth_override": 2} for p in target["placed_tools"]]
+    assert client.put(f"/api/bins/{target['id']}", json={"bin_config": config, "placed_tools": placed}).status_code == 200
+    _, mesh = _printed_bin(client, target["id"], tmp_path)
+    insert_path = tmp_path / "insert.stl"
+    raw = ScaledPolygon("insert", [(p["x"], p["y"]) for p in placed[0]["points"]], "Insert")
+    assert ManifoldSTLGenerator().generate_insert([raw], GenerateRequest.model_validate(config), str(insert_path), -21, -21)
+    insert = trimesh.load_mesh(insert_path)
+    insert_top = _surface_z(mesh) + insert.bounds[1, 2]-insert.bounds[0, 2]
+    assert insert_top > mesh.bounds[1, 2]
+    assert client.patch(url, json={"container_height_mm": insert_top+1+offset, "bin_layout": [layout[0]]}).status_code == 200
+    assessment = client.post(url + "/assessment", json={}).json()
+    assert assessment["status"] == ("invalid" if offset < 0 else "uncertain")
+    assert assessment["missing_tool_ids"] == ["tool-1"]
+    assert any(v["code"] == "insert_ceiling" for v in assessment["violations"]) == (offset < 0)
+
+
+@pytest.mark.parametrize("offset", [-.01, 0, .01])
+def test_known_insert_upper_bin_collision_with_missing_tool_thickness(tmp_path, monkeypatch, offset):
+    client, _, bins, url, _ = _toolbox_workflow(tmp_path, monkeypatch, thickness=None)
+    target = bins[0]
+    # The clamped 2u pocket permits crossing the base boundary with legal inserts.
+    config = {**target["bin_config"], "height_units": 2, "insert_enabled": True, "insert_height": 6.25+offset}
+    placed = [{**p, "depth_override": 2} for p in target["placed_tools"]]
+    assert client.put(f"/api/bins/{target['id']}", json={"bin_config": config, "placed_tools": placed}).status_code == 200
+    lower, lower_mesh = _printed_bin(client, target["id"], tmp_path)
+    upper, upper_mesh = _printed_bin(client, bins[1]["id"], tmp_path)
+    insert_path = tmp_path / "insert.stl"
+    raw = ScaledPolygon("insert", [(p["x"], p["y"]) for p in placed[0]["points"]], "Insert")
+    assert ManifoldSTLGenerator().generate_insert([raw], GenerateRequest.model_validate(config), str(insert_path), -21, -21)
+    insert = trimesh.load_mesh(insert_path)
+    insert_height = insert.bounds[1, 2] - insert.bounds[0, 2]
+    assessment = client.post(url + "/assessment", json={}).json()
+    z = assessment["placements"][1]["z_mm"]
+    assert (lower ^ upper.translate((0, 0, z))).volume() < 1e-4
+    assert (lower ^ upper.translate((0, 0, z-.02))).volume() > 1e-4
+    clearance = z + upper_mesh.bounds[0, 2] - _surface_z(lower_mesh) - insert_height - 1
+    assert assessment["placements"][0]["envelopes"][0]["resting_z_mm"] == pytest.approx(_surface_z(lower_mesh) + insert_height)
+    assert clearance == pytest.approx(-offset, abs=1e-5)
+    assert assessment["status"] == ("invalid" if clearance < -1e-5 else "uncertain")
+    assert assessment["missing_tool_ids"] == ["tool-1"]
+    assert any(v["code"] == "insert_clearance" for v in assessment["violations"]) == (offset > 0)
+
+
+def test_insert_override_minimum_uses_single_insert_allowance(tmp_path, monkeypatch):
+    client, _, bins, url, _ = _toolbox_workflow(tmp_path, monkeypatch, thickness=5)
+    target = bins[0]
+    placed = [{**p, "depth_override": 2} for p in target["placed_tools"]]
+    config = {**target["bin_config"], "insert_enabled": True, "insert_height": 4}
+    assert client.put(f"/api/bins/{target['id']}", json={"bin_config": config, "placed_tools": placed}).status_code == 200
+    deeper, rim = client.get(f"/api/bins/{target['id']}/height-planning?safety_clearance_mm=1").json()["alternatives"]
+    assert deeper["bin_config"]["height_units"] == 3
+    assert deeper["placed_tools"][0]["depth_override"] == 6
+    assert rim["bin_config"]["height_units"] == 4 and rim["bin_config"]["rim_units"] == 1
+    assert rim["placed_tools"][0]["depth_override"] == 2
+    assert client.put(f"/api/bins/{target['id']}", json={
+        "bin_config": deeper["bin_config"], "placed_tools": deeper["placed_tools"],
+    }).status_code == 200
+    fitted = client.post(url + "/assessment", json={}).json()
+    assert fitted["status"] == "verified"
+    _, mesh = _printed_bin(client, target["id"], tmp_path)
+    envelope = fitted["placements"][0]["envelopes"][0]
+    assert envelope["resting_z_mm"] == pytest.approx(_surface_z(mesh) + 4)
+    assert envelope["top_mm"] == pytest.approx(_surface_z(mesh) + 4 + 5)
+    assert envelope["clearance_mm"] == pytest.approx(0, abs=1e-6)
+
+
+def test_embossed_label_prevents_intact_mating_and_api_rejects_attachment(tmp_path, monkeypatch):
+    client, project, bins, url, layout = _toolbox_workflow(tmp_path, monkeypatch)
+    lower_id, upper_id = [data["id"] for data in bins]
+    config = {**bins[0]["bin_config"], "text_labels": [
+        TextLabel(id="label", text="M", x=6, y=21, font_size=5, depth=1, emboss=True).model_dump(),
+    ]}
+    assert client.put(f"/api/bins/{lower_id}", json={"bin_config": config}).status_code == 200
+    lower, _ = _printed_bin(client, lower_id, tmp_path)
+    upper, _ = _printed_bin(client, upper_id, tmp_path)
+    assert (lower ^ upper.translate((0, 0, 28))).volume() > 1e-4
+    assessment = client.post(url + "/assessment", json={}).json()
+    assert assessment["status"] == "invalid"
+    assert assessment["placements"][1]["support_compatible"] is False
+    z = assessment["placements"][1]["z_mm"]
+    assert (lower ^ upper.translate((0, 0, z))).volume() < 1e-4
+    assert (lower ^ upper.translate((0, 0, z-.02))).volume() > 1e-4
+    floors = [layout[0], {**layout[1], "x": 1, "support_id": None}]
+    assert client.patch(url, json={"bin_layout": floors}).status_code == 200
+    response = client.post(url + "/placements/upper/stack-action", json={"action": "stack_on", "support_id": "lower"})
+    assert response.status_code == 400
+    saved = client.get(f"/api/bin-projects/{project['id']}").json()["sketches"][0]["bin_layout"]
+    assert saved[1]["support_id"] is None and saved[1]["x"] == 1
+    planning = client.get(f"/api/bins/{lower_id}/height-planning?safety_clearance_mm=1").json()
+    assert planning["alternatives"][0]["bin_config"] is None
+    assert planning["alternatives"][1]["bin_config"]["rim_units"] == 1
+
+
+def test_finger_hole_removing_printed_lip_is_not_verified_or_attachable(tmp_path, monkeypatch):
+    client, project, bins, url, layout = _toolbox_workflow(tmp_path, monkeypatch)
+    for data in bins:
+        placed = [{**p, "rotation": 0, "points": [{"x": x, "y": y} for x, y in [(16, 16), (26, 16), (26, 26)]]} for p in data["placed_tools"]]
+        assert client.put(f"/api/bins/{data['id']}", json={"placed_tools": placed}).status_code == 200
+    assert client.put("/api/tools/tool-1", json={"finger_holes": [
+        {"id": "breach", "x": 24, "y": 5, "radius": 6, "shape": "circle"},
+    ]}).status_code == 200
+    lower, _ = _printed_bin(client, bins[0]["id"], tmp_path)
+    reference, _ = ManifoldSTLGenerator().generate_bin([], GenerateRequest.model_validate(bins[0]["bin_config"]), None)
+    assert (reference.trim_by_plane((0, 0, 1), 28.02) - lower).volume() > .01
+    assessment = client.post(url + "/assessment", json={}).json()
+    assert assessment["status"] == "invalid"
+    assert assessment["placements"][1]["support_compatible"] is False
+    assert any(v["code"] == "support" for v in assessment["violations"])
+    floors = [layout[0], {**layout[1], "x": 1, "support_id": None}]
+    assert client.patch(url, json={"bin_layout": floors}).status_code == 200
+    rejected = client.post(url + "/placements/upper/stack-action", json={"action": "stack_on", "support_id": "lower"})
+    assert rejected.status_code == 400
+    saved = client.get(f"/api/bin-projects/{project['id']}").json()["sketches"][0]["bin_layout"]
+    assert saved[1]["support_id"] is None and saved[1]["x"] == 1
+
+
+@pytest.mark.parametrize("kind", ["undersized", "wall", "outside"])
+def test_unseated_tool_has_no_claimed_floor_or_optimistic_lid_clearance(tmp_path, monkeypatch, kind):
+    client, _, bins, url, layout = _toolbox_workflow(tmp_path, monkeypatch)
+    target = bins[0]
+    if kind == "undersized":
+        assert client.put("/api/tools/tool-1", json={
+            "points": [{"x": x, "y": y} for x, y in [(-19, -19), (19, -19), (19, 19), (-19, 19)]],
+            "smoothed": False,
+        }).status_code == 200
+        points = [(2, 2), (40, 2), (40, 40), (2, 40)]
+    else:
+        shift = 20 if kind == "wall" else 40
+        points = [(16+shift, 16), (26+shift, 16), (26+shift, 26)]
+    placed = [{**p, "rotation": 0, "points": [{"x": x, "y": y} for x, y in points]} for p in target["placed_tools"]]
+    assert client.put(f"/api/bins/{target['id']}", json={"placed_tools": placed}).status_code == 200
+    assert client.patch(url, json={"container_height_mm": 40, "bin_layout": [layout[0]]}).status_code == 200
+    printed, mesh = _printed_bin(client, target["id"], tmp_path)
+    footprint = mf.CrossSection([[(x-21, -(y-21)) for x, y in points]], mf.FillRule.EvenOdd)
+    if kind == "outside":
+        assert min(x-21 for x, _ in points) > mesh.bounds[1, 0]
+    else:
+        floor = _surface_z(mesh, *( (16, 4) if kind == "wall" else (0, 0) ))
+        assert (footprint ^ printed.slice(floor+.01)).area() > .01
+    assessment = client.post(url + "/assessment", json={}).json()
+    assert assessment["status"] == "invalid"
+    assert any(v["code"] == "tool_seating" and v["tool_id"] == "tool-1" for v in assessment["violations"])
+    envelope = assessment["placements"][0]["envelopes"][0]
+    assert envelope["seating_verified"] is False
+    assert envelope["resting_z_mm"] is None and envelope["top_mm"] is None and envelope["clearance_mm"] is None
+    planning = client.get(f"/api/bins/{target['id']}/height-planning?safety_clearance_mm=1").json()
+    assert all(p["bin_config"] is None for p in planning["alternatives"])
+
+
+@pytest.mark.parametrize("half_grid", [False, True])
+@pytest.mark.parametrize("offset,status", [(-.01, "invalid"), (0, "verified"), (.01, "verified")])
+def test_raised_rotated_stack_ceiling_boundary_matches_printed_contact(tmp_path, monkeypatch, half_grid, offset, status):
+    client, _, bins, url, layout = _toolbox_workflow(tmp_path, monkeypatch)
+    for index, data in enumerate(bins):
+        config = {**data["bin_config"], "rim_units": 1, "half_grid_base": half_grid,
+                  "grid_x": 2 if index == 0 else 1, "grid_y": 1 if index == 0 else 2}
+        assert client.put(f"/api/bins/{data['id']}", json={"bin_config": config}).status_code == 200
+    assert client.patch(url, json={"bin_layout": [layout[0], {**layout[1], "rotation": 90}]}).status_code == 200
+    lower, _ = _printed_bin(client, bins[0]["id"], tmp_path)
+    upper, upper_mesh = _printed_bin(client, bins[1]["id"], tmp_path)
+    upper = upper.rotate((0, 0, -90))
+    initial = client.post(url + "/assessment", json={}).json()
+    z = initial["placements"][1]["z_mm"]
+    assert (lower ^ upper.translate((0, 0, z))).volume() < 1e-4
+    assert (lower ^ upper.translate((0, 0, z-.02))).volume() > 1e-4
+    ceiling = z + upper_mesh.bounds[1, 2] + 1 + offset
+    assert client.patch(url, json={"container_height_mm": ceiling}).status_code == 200
+    final = client.post(url + "/assessment", json={}).json()
+    assert final["status"] == status
+    assert final["stacks"][0]["headroom_mm"] == pytest.approx(offset, abs=1e-5)

@@ -19,6 +19,7 @@ import {
   rotationOffsetMm,
   snapForBin,
   snapUnits,
+  transformStack,
 } from '@/lib/drawerLayout'
 
 function bin(id: string, gridX: number, gridY: number, name = id, halfGridBase = false): BinSummary {
@@ -317,5 +318,39 @@ describe('drawerStats', () => {
     expect(stats.placementCount).toBe(3)
     expect(stats.placedBinCount).toBe(2)
     expect(stats.unplacedBinCount).toBe(1)
+  })
+})
+
+describe('supported stacks', () => {
+  const lower = placement('a', 0, 0, 0, 'lower')
+  const upper = { ...placement('a', 0, 0, 0, 'upper'), support_id: 'lower' }
+  const bins = [bin('a', 2, 1), bin('b', 1, 1)]
+
+  it('counts a stack and overlapping floor copies as a union, not extra capacity', () => {
+    const stats = drawerStats([lower, upper, placement('a', 0, 0, 0, 'copy')], bins, 4, 2)
+    expect(stats.usedUnits).toBe(2)
+    expect(stats.freeUnits).toBe(6)
+    const conflicts = findLayoutConflicts([lower, upper], binById(bins), 4, 2)
+    expect(conflicts.overlapping.size).toBe(0)
+    expect(findLayoutConflicts([lower, upper, placement('a', 0, 0, 0, 'copy')], binById(bins), 4, 2).overlapping.has('copy')).toBe(true)
+  })
+
+  it('moves and rotates every member without changing relative orientation', () => {
+    const result = transformStack([lower, { ...upper, rotation: 180 }], 'upper', 1, 1, 90)
+    expect(result.map(p => [p.id, p.x, p.y, p.rotation])).toEqual([['lower', 1, 1, 90], ['upper', 1, 1, 270]])
+    expect(result[1].support_id).toBe('lower')
+  })
+
+  it('preserves stacks while auto-arranging independent floor placements', () => {
+    const result = autoArrange([lower, upper, placement('b', 0, 0, 0, 'independent')], binById(bins), 4, 2)
+    expect(result.placements).toContainEqual(lower)
+    expect(result.placements).toContainEqual(upper)
+    expect(findLayoutConflicts(result.placements, binById(bins), 4, 2).overlapping.size).toBe(0)
+  })
+
+  it('never rounds a non-grid container edge upward while clamping', () => {
+    expect(clampToDrawer({ x: 3, y: 0, w: 1, h: 1 }, 100 / 42, 2, 1).x).toBe(1)
+    expect(clampToDrawer({ x: 3, y: 0, w: 1, h: 1 }, 100 / 42, 2, .5).x).toBe(1)
+    expect(findFreeSpot(bin('large', 2.5, 1), [], 100 / 42, 2)).toBeNull()
   })
 })

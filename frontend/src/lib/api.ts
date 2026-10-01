@@ -17,6 +17,9 @@ import type {
   ProjectBinPlacement,
   ProjectHealthResponse,
   ProjectSketch,
+  ContainerLimits,
+  ToolboxAssessment,
+  BinHeightPlanning,
   ProjectStatus,
   BinData,
   BinSummary,
@@ -259,6 +262,7 @@ export async function updateTool(
   toolId: string,
   updates: {
     name?: string
+    thickness_mm?: number | null
     points?: Point[]
     finger_holes?: import('@/types').FingerHole[]
     interior_rings?: Point[][]
@@ -341,7 +345,7 @@ export async function updateProject(
 
 export async function createProjectSketch(
   projectId: string,
-  sketch: { name?: string; target_grid_x?: number | null; target_grid_y?: number | null } = {},
+  sketch: { name?: string; target_grid_x?: number | null; target_grid_y?: number | null } & ContainerLimits = {},
 ): Promise<ProjectSketch> {
   return fetchApi(`/api/bin-projects/${projectId}/sketches`, {
     method: 'POST',
@@ -357,11 +361,29 @@ export async function updateProjectSketch(
     target_grid_x?: number | null
     target_grid_y?: number | null
     bin_layout?: ProjectBinPlacement[]
-  },
+  } & ContainerLimits,
 ): Promise<ProjectSketch> {
   return fetchApi(`/api/bin-projects/${projectId}/sketches/${sketchId}`, {
     method: 'PATCH',
     body: JSON.stringify(updates),
+  })
+}
+
+export async function assessProjectSketch(projectId: string, sketchId: string, updates: Partial<ProjectSketch>): Promise<ToolboxAssessment> {
+  return fetchApi(`/api/bin-projects/${projectId}/sketches/${sketchId}/assessment`, {
+    method: 'POST', body: JSON.stringify(updates),
+  })
+}
+
+export async function planBinHeight(binId: string, config: BinConfig, placedTools: PlacedTool[], safetyClearance = 0): Promise<BinHeightPlanning> {
+  return fetchApi(`/api/bins/${binId}/height-planning?safety_clearance_mm=${safetyClearance}`, {
+    method: 'POST', body: JSON.stringify({ bin_config: config, placed_tools: placedTools }),
+  })
+}
+
+export async function stackAction(projectId: string, sketchId: string, placementId: string, action: 'stack_on' | 'remove_substack' | 'remove_reconnect' | 'move_up' | 'move_down', binLayout: ProjectBinPlacement[], supportId?: string, removeBinCopies = false): Promise<ProjectSketch> {
+  return fetchApi(`/api/bin-projects/${projectId}/sketches/${sketchId}/placements/${placementId}/stack-action`, {
+    method: 'POST', body: JSON.stringify({ action, bin_layout: binLayout, support_id: supportId, remove_bin_copies: removeBinCopies }),
   })
 }
 

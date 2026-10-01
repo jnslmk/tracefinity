@@ -2,15 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { getProject, listBins, updateProjectSketch } from '@/lib/api'
-import type { BinProject, BinSummary, ProjectBinPlacement, ProjectSketch } from '@/types'
+import { getProject, listBins, stackAction, updateProjectSketch } from '@/lib/api'
+import type { BinProject, BinSummary, ContainerLimits, ProjectBinPlacement, ProjectSketch } from '@/types'
 import { Alert } from '@/components/Alert'
 import { Breadcrumb } from '@/components/Breadcrumb'
 import { NumericInput } from '@/components/NumericInput'
 import { BIN_DRAG_MIME, DrawerSketchCanvas } from '@/components/DrawerSketchCanvas'
 import { DrawerSketch3D } from '@/components/DrawerSketch3D'
-import { useBinStlUrls } from '@/hooks/useBinStlUrls'
 import { useDebouncedSave } from '@/hooks/useDebouncedSave'
+import { useToolboxPlanning } from '@/hooks/useToolboxPlanning'
 import { GRID_UNIT } from '@/lib/constants'
 import {
   DEFAULT_DRAWER_GRID_X,
@@ -28,12 +28,16 @@ import {
   findLayoutConflicts,
   nextRotation,
   placementRect,
+  stackRoot,
+  transformStack,
+  snapForBin,
+  snapUnits,
 } from '@/lib/drawerLayout'
 import { binLabel } from '@/lib/projectSelectors'
 import { cn } from '@/lib/utils'
 import { AlertTriangle, Box, Check, Copy, Grid2x2, LayoutGrid, Loader2, Palette, Plus, RotateCw, Sparkles, Trash2, TriangleAlert, X } from 'lucide-react'
 
-type ViewMode = '2d' | '3d'
+type ViewMode = '2d' | 'side' | '3d'
 
 function ColorSwatches({ value, onChange }: { value: string | null; onChange: (color: string | null) => void }) {
   return (
@@ -92,6 +96,15 @@ export default function ProjectSketchPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  const [container, setContainer] = useState<ContainerLimits>({ container_width_mm: null, container_depth_mm: null, container_height_mm: null, safety_clearance_mm: 0 })
+  const [actionBusy, setActionBusy] = useState(false)
+  const [removeDialogId, setRemoveDialogId] = useState<string | null>(null)
+  const [removeBinCopies, setRemoveBinCopies] = useState(false)
+  const saveFlight = useRef<Promise<unknown>>(Promise.resolve())
+  const removeDialogRef = useRef<HTMLDialogElement>(null)
+  useEffect(() => { if (removeDialogId) removeDialogRef.current?.showModal() }, [removeDialogId])
+  const draft = useMemo(() => ({ ...container, target_grid_x: drawerX, target_grid_y: drawerY, bin_layout: placements }), [container, drawerX, drawerY, placements])
+  const { assessment, error: assessmentError, refresh: refreshAssessment } = useToolboxPlanning(projectId, sketchId, draft, Boolean(sketch))
   useEffect(() => {
     async function load() {
       try {
@@ -107,6 +120,7 @@ export default function ProjectSketchPage() {
         setPlacements(sketchData.bin_layout)
         setDrawerX(sketchData.target_grid_x)
         setDrawerY(sketchData.target_grid_y)
+        setContainer({ container_width_mm: sketchData.container_width_mm ?? null, container_depth_mm: sketchData.container_depth_mm ?? null, container_height_mm: sketchData.container_height_mm ?? null, safety_clearance_mm: sketchData.safety_clearance_mm ?? 0 })
       } catch (err) {
         setError(err instanceof Error ? err.message : 'failed to load project')
       } finally {
@@ -116,11 +130,12 @@ export default function ProjectSketchPage() {
     load()
   }, [projectId, sketchId])
 
-  const hasDrawer = drawerX !== null && drawerY !== null
-  const gridX = drawerX ?? DEFAULT_DRAWER_GRID_X
-  const gridY = drawerY ?? DEFAULT_DRAWER_GRID_Y
+  const hasDrawer = (container.container_width_mm != null || drawerX !== null) && (container.container_depth_mm != null || drawerY !== null)
+  const gridX = container.container_width_mm != null ? container.container_width_mm / GRID_UNIT : drawerX ?? DEFAULT_DRAWER_GRID_X
+  const gridY = container.container_depth_mm != null ? container.container_depth_mm / GRID_UNIT : drawerY ?? DEFAULT_DRAWER_GRID_Y
 
-  const binMap = useMemo(() => binById(bins), [bins])
+  const currentBins = assessment?.bins ?? bins
+  const binMap = useMemo(() => binById(currentBins), [currentBins])
   const placementCounts = useMemo(() => {
     const counts = new Map<string, number>()
     for (const placement of placements) {
@@ -132,7 +147,9 @@ export default function ProjectSketchPage() {
     () => findLayoutConflicts(placements, binMap, gridX, gridY),
     [placements, binMap, gridX, gridY],
   )
-  const stats = useMemo(() => drawerStats(placements, bins, gridX, gridY), [placements, bins, gridX, gridY])
+  const stats = useMemo(() => drawerStats(placements, currentBins, Math.floor(gridX * 2) / 2, Math.floor(gridY * 2) / 2), [placements, currentBins, gridX, gridY])
+  const sideBaseline = assessment?.height_mm ?? Math.max(70, ...(assessment?.placements.map(p => p.top_mm) ?? []))
+  const sideMinY = Math.min(-15, sideBaseline - Math.max(0, ...(assessment?.placements.map(p => p.top_mm) ?? [])) - 15)
   const selectedPlacement = placements.find(placement => placement.id === selectedPlacementId) || null
 
   // a "kept" notice only stays while some of those placements still exist and still conflict
@@ -152,13 +169,12 @@ export default function ProjectSketchPage() {
   const { saving, saved, error: saveError, flush } = useDebouncedSave(
     async () => {
       if (!project || !sketch) return
-      await updateProjectSketch(project.id, sketch.id, {
-        target_grid_x: drawerX,
-        target_grid_y: drawerY,
-        bin_layout: placements,
-      })
+      const snapshot = draft
+      const flight = saveFlight.current.catch(() => {}).then(() => updateProjectSketch(project.id, sketch.id, snapshot))
+      saveFlight.current = flight
+      await flight
     },
-    [project, sketch, drawerX, drawerY, placements],
+    [project, sketch, draft],
     400,
     { skipInitial: true },
   )
@@ -166,6 +182,24 @@ export default function ProjectSketchPage() {
   const flushRef = useRef(flush)
   useEffect(() => { flushRef.current = flush }, [flush])
   useEffect(() => () => { flushRef.current() }, [])
+
+  async function handleStackAction(placementId: string, action: 'stack_on' | 'remove_substack' | 'remove_reconnect' | 'move_up' | 'move_down', supportId?: string) {
+    if (actionBusy) return
+    setActionBusy(true)
+    try {
+      await flush()
+      await saveFlight.current
+      const updated = await stackAction(projectId, sketchId, placementId, action, placements, supportId, removeDialogId === placementId && removeBinCopies)
+      setPlacements(updated.bin_layout)
+      setRemoveDialogId(null)
+      if (!updated.bin_layout.some(p => p.id === selectedPlacementId)) setSelectedPlacementId(null)
+      setError(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Stack action failed; saved placements are unchanged')
+    } finally {
+      setActionBusy(false)
+    }
+  }
 
   async function handleRename(name: string) {
     if (!project || !sketch) return
@@ -178,12 +212,6 @@ export default function ProjectSketchPage() {
     }
   }
 
-  // real bin models for the 3D view; generation is hash-cached server side, so
-  // this is a no-op once a bin has been generated with its current config
-  const { stlUrls, pendingCount: pendingStlCount } = useBinStlUrls(
-    placements.map(placement => placement.bin_id),
-    view === '3d',
-  )
 
   const occupiedRects = useCallback((current: ProjectBinPlacement[], exceptPlacementId?: string) => (
     current
@@ -200,10 +228,12 @@ export default function ProjectSketchPage() {
   ), [placements])
 
   const handleMove = useCallback((placementId: string, x: number, y: number) => {
-    setPlacements(prev => prev.map(placement => (
-      placement.id === placementId ? { ...placement, x, y } : placement
-    )))
-  }, [])
+    setPlacements(prev => {
+      const root = stackRoot(prev, placementId)
+      const snap = snapForBin(root ? binMap.get(root.bin_id) : undefined)
+      return transformStack(prev, placementId, snapUnits(x, snap), snapUnits(y, snap))
+    })
+  }, [binMap])
 
   const handleDropBin = useCallback((binId: string, x: number, y: number) => {
     const placementId = newPlacementId()
@@ -242,6 +272,7 @@ export default function ProjectSketchPage() {
       return [...prev, {
         ...source,
         id: copyId,
+        support_id: null,
         x: spot?.x ?? source.x,
         y: spot?.y ?? source.y,
         rotation: spot?.rotation ?? source.rotation,
@@ -262,31 +293,43 @@ export default function ProjectSketchPage() {
   }, [])
 
   const handleRemove = useCallback((placementId: string) => {
+    if (placements.some(p => p.support_id === placementId)) {
+      setRemoveDialogId(placementId)
+      setRemoveBinCopies(false)
+      return
+    }
     setPlacements(prev => prev.filter(placement => placement.id !== placementId))
     setSelectedPlacementId(prev => (prev === placementId ? null : prev))
-  }, [])
+  }, [placements])
 
   const handleRemoveBin = useCallback((binId: string) => {
-    setPlacements(prev => prev.filter(placement => placement.bin_id !== binId))
+    const source = placements.find(p => p.bin_id === binId && placements.some(q => q.support_id === p.id))
+    if (source) {
+      setRemoveDialogId(source.id)
+      setRemoveBinCopies(true)
+      return
+    }
+    setPlacements(prev => prev.filter(p => p.bin_id !== binId))
     setSelectedPlacementId(null)
-  }, [])
+  }, [placements])
 
   const handleRotate = useCallback((placementId: string) => {
-    setPlacements(prev => prev.map(placement => {
-      if (placement.id !== placementId) return placement
-      const bin = binMap.get(placement.bin_id)
-      const rotation = nextRotation(placement.rotation)
-      if (!bin) return { ...placement, rotation }
+    setPlacements(prev => {
+      const root = stackRoot(prev, placementId)
+      if (!root) return prev
+      const bin = binMap.get(root.bin_id)
+      const rotation = nextRotation(root.rotation)
+      if (!bin) return prev
       const { w, h } = binFootprint(bin, rotation)
-      const clamped = clampToDrawer({ x: placement.x, y: placement.y, w, h }, gridX, gridY)
-      return { ...placement, rotation, ...clamped }
-    }))
+      const clamped = clampToDrawer({ x: root.x, y: root.y, w, h }, gridX, gridY, snapForBin(bin))
+      return transformStack(prev, root.id, clamped.x, clamped.y, rotation)
+    })
   }, [binMap, gridX, gridY])
 
   const handleAutoArrange = useCallback(() => {
     const seeding = placements.length === 0
     const input = seeding
-      ? bins.map(bin => ({ id: newPlacementId(), bin_id: bin.id, x: 0, y: 0, rotation: 0, color: null }))
+      ? currentBins.map(bin => ({ id: newPlacementId(), bin_id: bin.id, x: 0, y: 0, rotation: 0, color: null }))
       : placements
     const result = autoArrange(input, binMap, gridX, gridY)
     const unfitted = new Set(result.unfittedIds)
@@ -297,7 +340,7 @@ export default function ProjectSketchPage() {
     setPlacements(seeding ? result.placements.filter(placement => !unfitted.has(placement.id)) : result.placements)
     setArrangeMisfits(count === 0 ? null : { kind: seeding ? 'skipped' : 'kept', ids: result.unfittedIds })
     setSelectedPlacementId(null)
-  }, [placements, bins, binMap, gridX, gridY])
+  }, [placements, currentBins, binMap, gridX, gridY])
 
   const handleEnableDrawer = useCallback(() => {
     setDrawerX(DEFAULT_DRAWER_GRID_X)
@@ -307,14 +350,13 @@ export default function ProjectSketchPage() {
   const handleDisableDrawer = useCallback(() => {
     setDrawerX(null)
     setDrawerY(null)
-    setPlacements([])
-    setSelectedPlacementId(null)
     setArrangeMisfits(null)
+    setContainer({ container_width_mm: null, container_depth_mm: null, container_height_mm: null, safety_clearance_mm: 0 })
   }, [])
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      if (!selectedPlacementId) return
+      if (!selectedPlacementId || actionBusy || removeDialogId) return
       const target = e.target as HTMLElement | null
       if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
       if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -332,7 +374,7 @@ export default function ProjectSketchPage() {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selectedPlacementId, handleRemove, handleRotate, handleDuplicate])
+  }, [selectedPlacementId, handleRemove, handleRotate, handleDuplicate, actionBusy, removeDialogId])
 
   if (loading) {
     return (
@@ -362,7 +404,7 @@ export default function ProjectSketchPage() {
   const selectedBin = selectedPlacement ? binMap.get(selectedPlacement.bin_id) : null
 
   return (
-    <div className="h-[calc(100vh-44px)] flex">
+    <div className="h-[calc(100vh-44px)] flex" inert={actionBusy}>
       {/* sidebar: drawer size, space usage, project bins */}
       <div className="w-[240px] flex-shrink-0 bg-surface border-r border-border flex flex-col">
         <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin p-3 space-y-3">
@@ -388,12 +430,35 @@ export default function ProjectSketchPage() {
             )}
 
             <h3 className="text-[10px] font-semibold text-text-muted uppercase tracking-[1.5px] mb-2">Drawer size</h3>
+            <fieldset className="space-y-2 mb-3 text-[11px] text-text-secondary">
+              <legend className="font-semibold text-text-primary">Usable container measurements</legend>
+              {([['container_width_mm', 'Usable width (mm)'], ['container_depth_mm', 'Usable depth (mm)'], ['container_height_mm', 'Usable height (mm)'], ['safety_clearance_mm', 'Safety clearance (mm)']] as const).map(([field, label]) => (
+                <label key={field} className="block">{label}
+                  <input aria-label={label} type="number" min={field === 'safety_clearance_mm' ? 0 : .01} step=".1"
+                    value={container[field] ?? ''} className="w-full bg-elevated border border-border rounded px-2 py-1"
+                    onChange={event => {
+                      const value = event.target.value === '' && field !== 'safety_clearance_mm' ? null : Number(event.target.value)
+                      if (value === null || (Number.isFinite(value) && (field === 'safety_clearance_mm' ? value >= 0 : value > 0))) setContainer(prev => ({ ...prev, [field]: value }))
+                    }} />
+                </label>
+              ))}
+              <label className="block">Height units (7 mm)
+                <input aria-label="Container height units" type="number" min=".01" step=".5"
+                  value={container.container_height_mm == null ? '' : container.container_height_mm / 7}
+                  className="w-full bg-elevated border border-border rounded px-2 py-1"
+                  onChange={event => { const v = Number(event.target.value); if (event.target.value === '') setContainer(prev => ({ ...prev, container_height_mm: null })); else if (Number.isFinite(v) && v > 0) setContainer(prev => ({ ...prev, container_height_mm: v * 7 })) }} />
+              </label>
+              <p>Floor datum: supporting surface beneath the lowest bin bases. Subtract installed baseplate or liner elevation from floor-to-closed-lid height. 10u means 70 mm, not guaranteed fit. Zero gap is not a manufacturing tolerance.</p>
+              <button type="button" className="btn-secondary px-2 py-1" onClick={() => setContainer({ container_width_mm: null, container_depth_mm: null, container_height_mm: null, safety_clearance_mm: 0 })}>Clear physical limits</button>
+              <p>Millimetre dimensions take precedence over grid controls. Clearing limits preserves placements.</p>
+            </fieldset>
             {hasDrawer ? (
               <div className="space-y-2">
                 <label className="text-[11px] text-text-secondary flex items-center justify-between gap-2">
                   Width
                   <NumericInput
                     value={gridX}
+                    disabled={container.container_width_mm != null}
                     min={DRAWER_GRID_MIN}
                     max={DRAWER_GRID_MAX}
                     step={0.5}
@@ -405,6 +470,7 @@ export default function ProjectSketchPage() {
                   Depth
                   <NumericInput
                     value={gridY}
+                    disabled={container.container_depth_mm != null}
                     min={DRAWER_GRID_MIN}
                     max={DRAWER_GRID_MAX}
                     step={0.5}
@@ -439,6 +505,34 @@ export default function ProjectSketchPage() {
             )}
           </div>
 
+          <section aria-label="Toolbox fit diagnostics" className="glass rounded-[10px] p-3 text-[11px] text-text-secondary space-y-2">
+            <button type="button" onClick={refreshAssessment} className="btn-secondary px-2 py-1">Reassess shared tools and bins</button>
+            {assessmentError && <p role="alert">{assessmentError}</p>}
+            {!assessment && !assessmentError && <p role="status">Assessing current plan…</p>}
+            {assessment && <>
+              <p role="status" data-testid="plan-fit-status">Fit: {assessment.status}</p>
+              <p>Usable grid {assessment.grid_x ?? 'unknown'} × {assessment.grid_y ?? 'unknown'}; residual edge strips {assessment.residual_width_mm?.toFixed(1) ?? '?'} × {assessment.residual_depth_mm?.toFixed(1) ?? '?'} mm.</p>
+              <p>Occupied floor {assessment.occupied_floor_units} units; free {assessment.free_cells.length / 4} units in {assessment.free_regions.length} connected regions.</p>
+              {assessment.free_regions.map((region, i) => <p key={i}>Free region {i + 1}: {region.area_units} units (not a packing guarantee)</p>)}
+              {assessment.violations.map((v, i) => <p role="alert" key={i}>{v.message}{v.clearance_mm !== undefined ? ` (${v.clearance_mm.toFixed(2)} mm)` : ''} {v.placement_id && `Placement ${v.placement_id}`}</p>)}
+              {assessment.unresolved.map((reason, i) => <p key={i}>Unresolved: {reason}</p>)}
+              {assessment.missing_tool_ids.map(id => <a key={id} className="block text-accent" href={`/tools/${id}`}>Measure tool {id}</a>)}
+              {assessment.unhoused_tool_ids.map(id => <p key={id}>Not housed in this plan: {id}</p>)}
+              {assessment.stacks.map(stack => <p key={stack.root_id}>Stack {stack.root_id.slice(0, 8)} headroom: {stack.headroom_mm?.toFixed(2) ?? 'unknown'} mm</p>)}
+              <p>Fit is conditional on measured resting thickness, conservative envelopes, gap and intact support. Physically check printed parts.</p>
+              {selectedPlacementId && assessment.placements.filter(p => p.placement_id === selectedPlacementId).map(p => <div key={p.placement_id} className="border-t border-border pt-2">
+                <p>Selected elevation {p.z_mm.toFixed(2)} mm; top {p.top_mm.toFixed(2)} mm; headroom {p.headroom_mm?.toFixed(2) ?? 'unknown'} mm. Support {p.support_compatible === null ? 'floor' : p.support_compatible ? 'compatible' : 'incompatible'}.</p>
+                {p.envelopes.map(e => <p key={e.id}>{e.name}: {!e.seating_verified ? 'resting elevation cannot be established' : e.thickness_mm == null ? 'unknown thickness' : `${e.thickness_mm} mm conservative envelope; rests at ${e.resting_z_mm?.toFixed(2)} mm; upper-bin clearance ${e.clearance_mm?.toFixed(2)} mm`}{e.tool_id === p.limiting_tool_id ? ' (limiting tool)' : ''}</p>)}
+              </div>)}
+            </>}
+          </section>
+          {placements.length > 0 && <section aria-label="Stack members" className="glass rounded-[10px] p-3 text-[11px] space-y-2">
+            <h3 className="font-semibold text-text-primary">Select every stack member</h3>
+            {placements.map((p, i) => <button key={p.id} type="button" aria-pressed={selectedPlacementId === p.id}
+              className="btn-secondary block w-full px-2 py-1 text-left" onClick={() => setSelectedPlacementId(p.id)}>
+              Placement {i + 1}: {binMap.get(p.bin_id)?.name || p.bin_id} · {p.support_id ? 'supported' : 'floor'}
+            </button>)}
+          </section>}
           {hasDrawer && (
             <div className="glass rounded-[10px] px-3 py-3">
               <h3 className="text-[10px] font-semibold text-text-muted uppercase tracking-[1.5px] mb-2">Space usage</h3>
@@ -476,7 +570,7 @@ export default function ProjectSketchPage() {
                 <button
                   type="button"
                   onClick={handleAutoArrange}
-                  disabled={bins.length === 0}
+                  disabled={currentBins.length === 0}
                   className="btn-secondary flex-1 px-2 py-1 text-[11px] inline-flex items-center justify-center gap-1"
                   title="Repack the current placements, largest bin first"
                 >
@@ -498,15 +592,15 @@ export default function ProjectSketchPage() {
 
           <div className="glass rounded-[10px] px-3 py-3">
             <h3 className="text-[10px] font-semibold text-text-muted uppercase tracking-[1.5px] mb-2">
-              Project bins ({bins.length})
+              Project bins ({currentBins.length})
             </h3>
-            {bins.length === 0 ? (
+            {currentBins.length === 0 ? (
               <p className="text-[11px] text-text-muted">
                 No bins in this project yet. Create bins on the project page first.
               </p>
             ) : (
               <div className="space-y-1.5">
-                {bins.map(bin => {
+                {currentBins.map(bin => {
                   const count = placementCounts.get(bin.id) || 0
                   const binColor = colorForBin(bin.id)
                   const colorsOpen = colorPickerBinId === bin.id
@@ -608,7 +702,7 @@ export default function ProjectSketchPage() {
       <div className="flex-1 min-w-0 flex flex-col">
         <div className="flex-shrink-0 bg-surface border-b border-border px-3 py-2 flex items-center justify-between gap-3">
           <div className="flex items-center gap-1">
-            {([['2d', '2D top down', LayoutGrid], ['3d', '3D', Box]] as const).map(([mode, label, Icon]) => (
+            {([['2d', '2D top down', LayoutGrid], ['side', 'Side clearance', LayoutGrid], ['3d', '3D', Box]] as const).map(([mode, label, Icon]) => (
               <button
                 key={mode}
                 type="button"
@@ -622,12 +716,6 @@ export default function ProjectSketchPage() {
                 {label}
               </button>
             ))}
-            {view === '3d' && pendingStlCount > 0 && (
-              <span className="ml-1 text-[10px] text-text-muted inline-flex items-center gap-1">
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Generating {pendingStlCount} model{pendingStlCount !== 1 ? 's' : ''}
-              </span>
-            )}
           </div>
           <p className="text-[11px] text-text-muted truncate">
             {hasDrawer
@@ -657,7 +745,40 @@ export default function ProjectSketchPage() {
               onSelect={setSelectedPlacementId}
               onMove={handleMove}
               onDropBin={handleDropBin}
+              assessment={assessment}
             />
+          ) : view === 'side' ? (
+            <div className="w-full h-full p-6">
+              <p className="text-text-secondary text-xs mb-3">Side clearance diagram: conservative tool envelopes and bin extents. Use 3D for actual generated surfaces.</p>
+              {!assessment ? <p role="status">Assessment pending</p> : <svg role="img" aria-label="Side clearance diagram" className="w-full h-[80%]"
+                viewBox={`-5 ${sideMinY} ${gridX * GRID_UNIT + 10} ${sideBaseline + 15 - sideMinY}`}>
+                {assessment.height_mm != null && <>
+                  <line x1="0" x2={gridX * GRID_UNIT} y1="0" y2="0" stroke="var(--color-text-primary)" strokeDasharray="4 2" />
+                  <text x="0" y="-5" fontSize="5" fill="var(--color-text-primary)">Closed lid ceiling {assessment.height_mm} mm</text>
+                </>}
+                {assessment.placements.map(p => {
+                  const placement = placements.find(item => item.id === p.placement_id)
+                  const bin = placement && binMap.get(placement.bin_id)
+                  if (!placement || !bin) return null
+                  const baseline = sideBaseline
+                  return <g key={p.placement_id} onClick={() => setSelectedPlacementId(p.placement_id)}>
+                    <rect x={placement.x * GRID_UNIT} y={baseline-p.z_mm-p.external_height_mm} width={binFootprint(bin, placement.rotation).w * GRID_UNIT}
+                      height={p.external_height_mm} fill={placement.color || DEFAULT_BIN_COLOR} fillOpacity=".2" stroke="var(--color-text-primary)" />
+                    <text x={placement.x * GRID_UNIT + 2} y={baseline-p.z_mm-2} fontSize="5" fill="var(--color-text-primary)">{bin.name || bin.id.slice(0,8)} · Z {p.z_mm.toFixed(1)} mm</text>
+                    {p.envelopes.filter(e => e.top_mm !== null && e.points.length > 0).map(e => <g key={e.id}>
+                      <rect x={Math.min(...e.points.map(pt => pt.x))} y={baseline-e.top_mm!} width={Math.max(...e.points.map(pt => pt.x))-Math.min(...e.points.map(pt => pt.x))}
+                        height={e.thickness_mm!} fill="#e5b854" fillOpacity=".4" stroke="var(--color-text-primary)" />
+                      <text x={Math.min(...e.points.map(pt => pt.x))} y={baseline-e.top_mm!-1} fontSize="4" fill="var(--color-text-primary)">{e.name} (conservative envelope)</text>
+                    </g>)}
+                    {p.envelopes.filter(e => e.insert_height_mm > 0 && e.resting_z_mm !== null && e.points.length > 0).map(e => <g key={`insert-${e.id}`}>
+                      <rect x={Math.min(...e.points.map(pt => pt.x))} y={baseline-e.resting_z_mm!} width={Math.max(...e.points.map(pt => pt.x))-Math.min(...e.points.map(pt => pt.x))}
+                        height={e.insert_height_mm} fill="#81bce0" fillOpacity=".5" stroke="var(--color-text-primary)" />
+                      <text x={Math.min(...e.points.map(pt => pt.x))} y={baseline-e.resting_z_mm!-1} fontSize="4" fill="var(--color-text-primary)">Insert for {e.name} (conservative envelope)</text>
+                    </g>)}
+                  </g>
+                })}
+              </svg>}
+            </div>
           ) : (
             <DrawerSketch3D
               bins={binMap}
@@ -667,20 +788,34 @@ export default function ProjectSketchPage() {
               selectedPlacementId={selectedPlacementId}
               overlapping={overlapping}
               outOfBounds={outOfBounds}
-              stlUrls={stlUrls}
+              assessment={assessment}
               onSelect={setSelectedPlacementId}
             />
           )}
 
           {/* floating controls for the selected placement */}
           {hasDrawer && selectedPlacement && selectedBin && (
-            <div className="absolute bottom-3.5 left-3.5 z-20 glass-toolbar px-3 py-2 flex items-center gap-2">
+            <div className="absolute bottom-3.5 left-3.5 right-3.5 z-20 glass-toolbar px-3 py-2 flex flex-wrap items-center gap-2">
               <span className="text-[11px] text-text-secondary truncate max-w-[200px]">
                 {binLabel(selectedBin)}
               </span>
               <span className="text-[10px] text-text-muted">
                 {selectedPlacement.x} / {selectedPlacement.y} · {selectedPlacement.rotation}°
               </span>
+              <label className="text-[11px]">Stack on
+                <select aria-label="Stack on placement" value="" className="bg-elevated border border-border rounded ml-1"
+                  onChange={event => { if (event.target.value) handleStackAction(selectedPlacement.id, 'stack_on', event.target.value) }}>
+                  <option value="">Choose support</option>
+                  {placements.filter(p => p.id !== selectedPlacement.id && !p.support_id && !placements.some(q => q.support_id === p.id)).map((p, i) => <option key={p.id} value={p.id}>Support {i + 1}: {binMap.get(p.bin_id)?.name || p.bin_id}</option>)}
+                  {placements.filter(p => p.id !== selectedPlacement.id && p.support_id && !placements.some(q => q.support_id === p.id)).map(p => <option key={p.id} value={p.id}>Top: {binMap.get(p.bin_id)?.name || p.bin_id}</option>)}
+                </select>
+              </label>
+              <button type="button" className="btn-secondary px-2 py-1 text-[11px]" onClick={() => handleStackAction(selectedPlacement.id, 'move_up')}>Move up in stack</button>
+              <button type="button" className="btn-secondary px-2 py-1 text-[11px]" onClick={() => handleStackAction(selectedPlacement.id, 'move_down')}>Move down in stack</button>
+              <label className="text-[11px]">Stack X<input aria-label="Stack X" type="number" step={selectedBin.half_grid_base ? .5 : 1} min="0" max="40" value={stackRoot(placements, selectedPlacement.id)?.x ?? 0}
+                className="w-12 bg-elevated border border-border rounded" onChange={e => { const root = stackRoot(placements, selectedPlacement.id); const v = Number(e.target.value); if (root && Number.isFinite(v) && v >= 0 && v <= 40) handleMove(root.id, v, root.y) }} /></label>
+              <label className="text-[11px]">Stack Y<input aria-label="Stack Y" type="number" step={selectedBin.half_grid_base ? .5 : 1} min="0" max="40" value={stackRoot(placements, selectedPlacement.id)?.y ?? 0}
+                className="w-12 bg-elevated border border-border rounded" onChange={e => { const root = stackRoot(placements, selectedPlacement.id); const v = Number(e.target.value); if (root && Number.isFinite(v) && v >= 0 && v <= 40) handleMove(root.id, root.x, v) }} /></label>
               <button
                 type="button"
                 onClick={() => handleRotate(selectedPlacement.id)}
@@ -712,6 +847,17 @@ export default function ProjectSketchPage() {
               />
             </div>
           )}
+          {removeDialogId && <dialog ref={removeDialogRef} aria-label="Remove stack member"
+            onCancel={event => { if (actionBusy) event.preventDefault(); else setRemoveDialogId(null) }}
+            className="fixed inset-0 bg-surface/95 text-text-primary rounded p-4 max-w-lg">
+            <div inert={actionBusy} className="space-y-3">
+              <p>Remove {removeBinCopies ? 'all copies of this bin' : 'this placement'} and upper sub-stacks, or reconnect the upper bins to remaining supports after compatibility checks? Library bins are retained.</p>
+              <button type="button" className="btn-secondary px-3 py-2" onClick={() => handleStackAction(removeDialogId, 'remove_substack')}>Remove upper sub-stack</button>
+              <button type="button" className="btn-secondary px-3 py-2" onClick={() => handleStackAction(removeDialogId, 'remove_reconnect')}>Remove and reconnect</button>
+              <button type="button" className="btn-secondary px-3 py-2" onClick={() => setRemoveDialogId(null)}>Cancel</button>
+              {error && <p role="alert">{error}</p>}
+            </div>
+          </dialog>}
         </div>
       </div>
     </div>

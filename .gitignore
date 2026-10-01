@@ -56,3 +56,6 @@ htmlcov/
 
 # playwright
 .playwright-mcp
+
+# implementation/review artifacts
+.implement-review/

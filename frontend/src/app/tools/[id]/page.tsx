@@ -61,11 +61,12 @@ export default function ToolPage() {
     load()
   }, [toolId])
 
-  const { saving, saved, saveCount } = useDebouncedSave(
+  const { saving, saved, saveCount, error: saveError } = useDebouncedSave(
     async () => {
       if (!tool) return
       await updateTool(toolId, {
         name,
+        thickness_mm: tool.thickness_mm ?? null,
         points: tool.points,
         finger_holes: tool.finger_holes,
         interior_rings: tool.interior_rings,
@@ -172,6 +173,19 @@ export default function ToolPage() {
       </div>
 
       <div className="absolute top-14 left-3.5 z-20 glass-toolbar px-3 py-2 min-w-[220px] max-w-[280px]">
+        <label className="block text-[11px] text-text-primary">
+          Tool thickness (mm)
+          <input aria-label="Tool thickness (mm)" type="number" min="0.01" step="0.1"
+            value={tool.thickness_mm ?? ''}
+            onChange={event => {
+              const value = event.target.value === '' ? null : Number(event.target.value)
+              if (value === null || (Number.isFinite(value) && value > 0)) setTool({ ...tool, thickness_mm: value })
+            }}
+            className="mt-1 w-full bg-elevated border border-border rounded px-2 py-1" />
+        </label>
+        <p className="text-[10px] text-text-secondary my-2">Maximum resting thickness in the scanned orientation, not outline length or width. Empty means unknown.</p>
+        <button type="button" className="btn-secondary text-[11px] px-2 py-1 mb-2" onClick={() => setTool({ ...tool, thickness_mm: null })}>Clear thickness</button>
+        {saveError && <Alert variant="error">Measurement or edits not saved: {saveError.message}</Alert>}
         <div className="flex items-center gap-1.5 text-[10px] font-semibold text-text-muted uppercase tracking-[1.5px]">
           <Folder className="w-3 h-3" />
           Projects

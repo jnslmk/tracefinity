@@ -77,3 +77,31 @@ Local and remote saliency tracers run on the paper rect from `_detect_paper_rect
 - `_align_mask()` extracts the tool region from the resized mask, searches for it in the inverted corrected image via `cv2.matchTemplate(TM_CCOEFF_NORMED)`, and applies a translation. Runs at 0.25x resolution (~20ms). Skipped if score < 0.15 or shift > 10% of image dimension.
 - `_trace_mask()` handles both alpha-channel PNGs (tool=opaque, bg=transparent) and RGB PNGs (tool=black, bg=white).
 - The prompt asks for a "stencil" -- flat black shapes on flat white. This works better than asking for a "mask" with `gemini-2.5-flash-image`.
+
+## Toolbox vertical datums
+
+Physical planning uses `bin_vertical_geometry` and `assess_printed_bin` beside the manifold generator.
+Never derive fit by summing nominal height units or STL bounding-box heights.
+Standalone exterior height includes the lip and enabled raised rim; assembled
+stack increments account for mating overlap. An intact floor stops the upper base
+at the floor datum; broad pockets can let it descend to the pocket edge or mating
+collar instead. Every raised collar, half-grid base and rotated interface is resolved
+against the actual generated solids, including embossed labels, in memory without
+exporting files. A nominal taper offset is not the sampled geometry's contact datum.
+Generated-surface tests independently check contact and pocket/insert resting
+surfaces, rather than copying preview arithmetic.
+Cutters must leave the protected mating lip/collar intact. Tool outlines must fit
+the clipped printed pocket and clear the solid at its floor; otherwise seating,
+resting elevation and tool-to-ceiling clearance are not claimed.
+
+Per-cutout depth overrides precede the global depth; insert allowance is added
+before physical clamping. The tool rests on the resulting floor **plus the
+printed insert thickness**, including shallow bins whose insert allowance was
+clamped. Scanned outline envelopes are conservative, not tool reconstruction.
+
+Support references are placement IDs local to one drawer plan. Root transforms
+carry the stack; missing supports and cycles must fail before replacing saved
+work. Floor occupancy is the root-footprint union, never summed stacked members.
+Fit assessments and preview revision keys are derived, never durable caches.
+Refresh current shared tool/bin data before assessing or generating; pending or
+failed STL loading must remain explicitly distinct from verified geometry.

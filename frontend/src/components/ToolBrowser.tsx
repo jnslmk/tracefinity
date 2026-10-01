@@ -200,6 +200,7 @@ export function ToolBrowser({ onAddTool, binWidthMm, binHeightMm, layout = 'grid
               </div>
               <div className="px-1.5 py-1">
                 <span className="text-[10px] text-text-secondary truncate block">{tool.name}</span>
+                <span className="text-[9px] text-text-muted block">{tool.thickness_mm == null ? 'Thickness unknown' : `${tool.thickness_mm} mm thick`}</span>
               </div>
             </button>
           ))}
@@ -252,6 +253,7 @@ export function ToolBrowser({ onAddTool, binWidthMm, binHeightMm, layout = 'grid
             <span className="text-[10px] text-text-secondary truncate">{tool.name}</span>
             <Plus className="w-3 h-3 text-text-muted opacity-0 group-hover:opacity-100 flex-shrink-0 transition-opacity" />
           </div>
+          <span className="px-1.5 pb-1 text-[9px] text-text-muted block">{tool.thickness_mm == null ? 'Thickness unknown' : `${tool.thickness_mm} mm thick`}</span>
         </button>
       ))}
       {filtered.length === 0 && search && (

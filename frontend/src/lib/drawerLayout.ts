@@ -94,10 +94,10 @@ export function rectFitsDrawer(rect: UnitRect, drawerX: number, drawerY: number)
 }
 
 /** Keep a placement inside the drawer when the bin still fits at all. */
-export function clampToDrawer(rect: UnitRect, drawerX: number, drawerY: number): { x: number; y: number } {
+export function clampToDrawer(rect: UnitRect, drawerX: number, drawerY: number, snap = HALF_GRID_SNAP): { x: number; y: number } {
   return {
-    x: Math.max(0, Math.min(rect.x, drawerX - rect.w)),
-    y: Math.max(0, Math.min(rect.y, drawerY - rect.h)),
+    x: Math.max(0, Math.min(rect.x, Math.floor((drawerX - rect.w) / snap) * snap)),
+    y: Math.max(0, Math.min(rect.y, Math.floor((drawerY - rect.h) / snap) * snap)),
   }
 }
 
@@ -163,6 +163,35 @@ export function binById(bins: BinSummary[]): Map<string, BinSummary> {
   return new Map(bins.map(bin => [bin.id, bin]))
 }
 
+export function stackRoot(placements: ProjectBinPlacement[], id: string): ProjectBinPlacement | undefined {
+  let current = placements.find(p => p.id === id)
+  const seen = new Set<string>()
+  while (current?.support_id && !seen.has(current.id)) {
+    seen.add(current.id)
+    current = placements.find(p => p.id === current!.support_id)
+  }
+  return current
+}
+
+export function upperSubstack(placements: ProjectBinPlacement[], id: string): Set<string> {
+  const ids = new Set([id])
+  for (let previous = -1; previous !== ids.size;) {
+    previous = ids.size
+    placements.forEach(p => { if (p.support_id && ids.has(p.support_id)) ids.add(p.id) })
+  }
+  return ids
+}
+
+export function transformStack(placements: ProjectBinPlacement[], id: string, x: number, y: number, rotation?: number): ProjectBinPlacement[] {
+  const root = stackRoot(placements, id)
+  if (!root) return placements
+  const members = upperSubstack(placements, root.id)
+  const delta = rotation === undefined ? 0 : rotation - root.rotation
+  return placements.map(p => members.has(p.id) ? {
+    ...p, x, y, rotation: normalizeRotation((p.rotation + delta + 360) % 360),
+  } : p)
+}
+
 /** Placement ids that overlap another bin or stick out of the drawer. */
 export function findLayoutConflicts(
   placements: ProjectBinPlacement[],
@@ -184,7 +213,7 @@ export function findLayoutConflicts(
 
   for (let i = 0; i < rects.length; i++) {
     for (let j = i + 1; j < rects.length; j++) {
-      if (rectsOverlap(rects[i].rect, rects[j].rect)) {
+      if (stackRoot(placements, rects[i].id)?.id !== stackRoot(placements, rects[j].id)?.id && rectsOverlap(rects[i].rect, rects[j].rect)) {
         overlapping.add(rects[i].id)
         overlapping.add(rects[j].id)
       }
@@ -239,8 +268,10 @@ export function autoArrange(
   drawerX: number,
   drawerY: number,
 ): { placements: ProjectBinPlacement[]; unfittedIds: string[] } {
+  const stackMembers = new Set(placements.filter(p => p.support_id).flatMap(p => [p.id, p.support_id!]))
+  const preserved = placements.filter(p => stackMembers.has(p.id))
   const ordered = placements
-    .filter(placement => bins.has(placement.bin_id))
+    .filter(placement => bins.has(placement.bin_id) && !stackMembers.has(placement.id))
     .sort((a, b) => {
       const binA = bins.get(a.bin_id)!
       const binB = bins.get(b.bin_id)!
@@ -251,7 +282,10 @@ export function autoArrange(
 
   const arranged: ProjectBinPlacement[] = []
   const unfitted: ProjectBinPlacement[] = []
-  const occupied: UnitRect[] = []
+  const occupied: UnitRect[] = preserved.filter(p => !p.support_id).flatMap(p => {
+    const bin = bins.get(p.bin_id)
+    return bin ? [placementRect(p, bin)] : []
+  })
 
   for (const placement of ordered) {
     const bin = bins.get(placement.bin_id)!
@@ -266,10 +300,10 @@ export function autoArrange(
   }
 
   // placements of bins that are not loaded cannot be measured; leave them untouched
-  const unknown = placements.filter(placement => !bins.has(placement.bin_id))
+  const unknown = placements.filter(placement => !bins.has(placement.bin_id) && !stackMembers.has(placement.id))
 
   return {
-    placements: [...arranged, ...unfitted, ...unknown],
+    placements: [...preserved, ...arranged, ...unfitted, ...unknown],
     unfittedIds: unfitted.map(placement => placement.id),
   }
 }
@@ -293,10 +327,15 @@ export function drawerStats(
   const byId = binById(bins)
   const known = placements.filter(placement => byId.has(placement.bin_id))
   const placedBinIds = new Set(known.map(placement => placement.bin_id))
-  const usedUnits = known.reduce((sum, placement) => {
-    const bin = byId.get(placement.bin_id)!
-    return sum + bin.grid_x * bin.grid_y
-  }, 0)
+  const roots = known.filter(p => !p.support_id).map(p => placementRect(p, byId.get(p.bin_id)!))
+  let usedUnits = 0
+  for (let y = 0; y < drawerY; y += .5) {
+    for (let x = 0; x < drawerX; x += .5) {
+      if (roots.some(rect => rectsOverlap(rect, { x, y, w: Math.min(.5, drawerX-x), h: Math.min(.5, drawerY-y) }))) {
+        usedUnits += Math.min(.5, drawerX-x) * Math.min(.5, drawerY-y)
+      }
+    }
+  }
   const drawerUnits = drawerX * drawerY
 
   return {

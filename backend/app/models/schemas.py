@@ -395,9 +395,16 @@ class ReuseCornersResponse(BaseModel):
 
 # --- tool library ---
 
+def _measurement_input(value):
+    # Reject non-standard JSON numeric tokens with a JSON-serialisable 422 input.
+    return str(value) if isinstance(value, float) and not math.isfinite(value) else value
+
+
 class Tool(BaseModel):
     id: str
     name: str
+    thickness_mm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    _finite_thickness = field_validator("thickness_mm", mode="before")(_measurement_input)
     points: list[Point]  # mm, centered at (0,0)
     finger_holes: list[FingerHole] = []  # mm, relative to tool origin
     interior_rings: list[list[Point]] = []  # mm, centered at (0,0)
@@ -426,6 +433,8 @@ class ToolDetailResponse(Tool):
 class ToolSummary(BaseModel):
     id: str
     name: str
+    thickness_mm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    _finite_thickness = field_validator("thickness_mm", mode="before")(_measurement_input)
     created_at: str | None
     point_count: int
     points: list[Point] = []
@@ -445,6 +454,8 @@ class ToolSummary(BaseModel):
 
 class ToolUpdateRequest(BaseModel):
     name: str | None = None
+    thickness_mm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    _finite_thickness = field_validator("thickness_mm", mode="before")(_measurement_input)
     points: list[Point] | None = None
     finger_holes: list[FingerHole] | None = None
     interior_rings: list[list[Point]] | None = None
@@ -515,6 +526,7 @@ class ProjectBinPlacement(BaseModel):
     y: float = 0
     rotation: int = 0  # 90 and 270 swap the bin footprint
     color: str | None = None  # #rrggbb highlight; None uses the default bin colour
+    support_id: str | None = None
 
     @field_validator("color")
     @classmethod
@@ -555,7 +567,17 @@ def legacy_sketch_id(project_id: str | None) -> str:
     return str(uuid.uuid5(_SKETCH_NAMESPACE, f"legacy-sketch:{project_id}"))
 
 
-class ProjectSketch(BaseModel):
+class ContainerLimits(BaseModel):
+    container_width_mm: float | None = Field(default=None, gt=0, le=1680, allow_inf_nan=False)
+    container_depth_mm: float | None = Field(default=None, gt=0, le=1680, allow_inf_nan=False)
+    container_height_mm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    safety_clearance_mm: float = Field(default=0, ge=0, allow_inf_nan=False)
+    _finite_measurements = field_validator(
+        "container_width_mm", "container_depth_mm", "container_height_mm", "safety_clearance_mm", mode="before",
+    )(_measurement_input)
+
+
+class ProjectSketch(ContainerLimits):
     """One drawer plan: a grid plus the bins placed on it. A project may hold several."""
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -652,7 +674,7 @@ class BinProjectUpdateRequest(BaseModel):
     notes: str | None = None
 
 
-class ProjectSketchCreateRequest(BaseModel):
+class ProjectSketchCreateRequest(ContainerLimits):
     name: str | None = None
     target_grid_x: float | None = None
     target_grid_y: float | None = None
@@ -663,7 +685,7 @@ class ProjectSketchCreateRequest(BaseModel):
         return _check_target_grid(v)
 
 
-class ProjectSketchUpdateRequest(BaseModel):
+class ProjectSketchUpdateRequest(ContainerLimits):
     name: str | None = None
     target_grid_x: float | None = None
     target_grid_y: float | None = None
@@ -673,6 +695,13 @@ class ProjectSketchUpdateRequest(BaseModel):
     @classmethod
     def validate_target_grid(cls, v: float | None) -> float | None:
         return _check_target_grid(v)
+
+
+class StackActionRequest(BaseModel):
+    action: Literal["stack_on", "remove_substack", "remove_reconnect", "move_up", "move_down"]
+    support_id: str | None = None
+    bin_layout: list[ProjectBinPlacement] | None = None
+    remove_bin_copies: bool = False
 
 
 class BinProjectToolsRequest(BaseModel):

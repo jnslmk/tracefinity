@@ -72,6 +72,28 @@ def make_project_detail(project: BinProject, user_bins: BinStore) -> BinProjectD
     )
 
 
+def transform_moved_stacks(previous: list[ProjectBinPlacement], placements: list[ProjectBinPlacement]) -> list[ProjectBinPlacement]:
+    """Root edits carry unchanged descendants; explicit member edits remain inspectable."""
+    layout = [p.model_copy(deep=True) for p in placements]
+    old = {p.id: p for p in previous}
+    for root in layout:
+        before = old.get(root.id)
+        if root.support_id or not before or (root.x, root.y, root.rotation) == (before.x, before.y, before.rotation):
+            continue
+        descendants = {root.id}
+        while True:
+            next_ids = {p.id for p in layout if p.support_id in descendants}
+            if next_ids <= descendants:
+                break
+            descendants.update(next_ids)
+        for member in layout:
+            prior = old.get(member.id)
+            if member.id != root.id and member.id in descendants and prior and (member.x, member.y, member.rotation) == (prior.x, prior.y, prior.rotation):
+                member.x, member.y = root.x, root.y
+                member.rotation = (prior.rotation + root.rotation - before.rotation) % 360
+    return layout
+
+
 def validate_bin_layout(
     project: BinProject,
     placements: list[ProjectBinPlacement],
@@ -97,6 +119,23 @@ def validate_bin_layout(
             )
         seen.add(placement.id)
         layout.append(placement)
+    by_id = {p.id: p for p in layout}
+    if any(p.support_id is not None and p.support_id not in by_id for p in layout):
+        raise HTTPException(status_code=400, detail="support must reference a placement in this plan")
+    supported: set[str] = set()
+    for placement in layout:
+        if placement.support_id is None:
+            continue
+        if placement.support_id in supported:
+            raise HTTPException(status_code=400, detail="a placement can directly support only one bin")
+        supported.add(placement.support_id)
+        ancestors = {placement.id}
+        current = placement
+        while current.support_id:
+            if current.support_id in ancestors:
+                raise HTTPException(status_code=400, detail="stack support cycle")
+            ancestors.add(current.support_id)
+            current = by_id[current.support_id]
     return layout
 
 
@@ -111,7 +150,13 @@ def drop_bins_from_layout(project: BinProject, bin_ids: set[str]) -> bool:
     """Remove placements for bins that left the project. Returns True when changed."""
     changed = False
     for sketch in project.sketches:
-        remaining = [p for p in sketch.bin_layout if p.bin_id not in bin_ids]
+        removed = {p.id for p in sketch.bin_layout if p.bin_id in bin_ids}
+        while True:
+            descendants = {p.id for p in sketch.bin_layout if p.support_id in removed}
+            if descendants <= removed:
+                break
+            removed.update(descendants)
+        remaining = [p for p in sketch.bin_layout if p.id not in removed]
         if len(remaining) != len(sketch.bin_layout):
             sketch.bin_layout = remaining
             changed = True

@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { BinSummary, ProjectBinPlacement } from '@/types'
+import type { BinSummary, ProjectBinPlacement, ToolboxAssessment } from '@/types'
 import { GRID_UNIT } from '@/lib/constants'
 import { polygonPathData } from '@/lib/svg'
 import {
@@ -28,6 +28,7 @@ interface Props {
   onSelect: (placementId: string | null) => void
   onMove: (placementId: string, x: number, y: number) => void
   onDropBin: (binId: string, x: number, y: number) => void
+  assessment?: ToolboxAssessment | null
 }
 
 interface DragState {
@@ -114,6 +115,7 @@ export function DrawerSketchCanvas({
   onSelect,
   onMove,
   onDropBin,
+  assessment,
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null)
   const [drag, setDrag] = useState<DragState | null>(null)
@@ -150,6 +152,7 @@ export function DrawerSketchCanvas({
         { x: snapUnits(pos.x - drag.grabX, snap), y: snapUnits(pos.y - drag.grabY, snap), w, h },
         drawerX,
         drawerY,
+        snap,
       )
       moveRef.current(drag.placementId, snapped.x, snapped.y)
     }
@@ -200,6 +203,7 @@ export function DrawerSketchCanvas({
       { x: snapUnits(pos.x - w / 2, snap), y: snapUnits(pos.y - h / 2, snap), w, h },
       drawerX,
       drawerY,
+      snap,
     )
     onDropBin(binId, spot.x, spot.y)
   }
@@ -244,6 +248,12 @@ export function DrawerSketchCanvas({
             stroke="var(--color-bin-preview-grid)" strokeWidth={0.6}
           />
         ))}
+        {assessment?.free_cells.map(cell => <rect key={`${cell.x}/${cell.y}`} x={cell.x * GRID_UNIT} y={cell.y * GRID_UNIT}
+          width={cell.w * GRID_UNIT} height={cell.h * GRID_UNIT} fill="var(--color-accent)" fillOpacity=".06" stroke="var(--color-border-subtle)" strokeWidth=".3" className="pointer-events-none" />)}
+        {assessment?.grid_x != null && assessment.residual_width_mm != null && assessment.residual_width_mm > 0 && <rect x={assessment.grid_x * GRID_UNIT} y="0"
+          width={assessment.residual_width_mm} height={drawerHeightMm} fill="var(--color-text-muted)" fillOpacity=".25"><title>Residual edge strip, not a usable grid cell</title></rect>}
+        {assessment?.grid_y != null && assessment.residual_depth_mm != null && assessment.residual_depth_mm > 0 && <rect x="0" y={assessment.grid_y * GRID_UNIT}
+          width={drawerWidthMm} height={assessment.residual_depth_mm} fill="var(--color-text-muted)" fillOpacity=".25"><title>Residual edge strip, not a usable grid cell</title></rect>}
 
         {placements.map(placement => {
           const bin = bins.get(placement.bin_id)
@@ -268,6 +278,10 @@ export function DrawerSketchCanvas({
               className="cursor-move"
               onMouseDown={handleBinMouseDown(placement)}
               onClick={e => e.stopPropagation()}
+              tabIndex={0}
+              role="button"
+              aria-label={`Select ${label} placement ${placement.id}`}
+              onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(placement.id) } }}
             >
               <title>
                 {`${label} · ${bin.grid_x}x${bin.grid_y} · ${bin.height_units}u high`}
@@ -282,13 +296,11 @@ export function DrawerSketchCanvas({
                 strokeDasharray={colors.dashed ? '5,3' : undefined}
                 rx={2}
               />
-              {bin.preview_tools.map((tool, index) => (
-                <path
-                  key={index}
-                  d={polygonPathData(
-                    tool.points.map(p => binPointToDrawerMm(p, placement, bin)),
-                    tool.interior_rings.map(ring => ring.map(p => binPointToDrawerMm(p, placement, bin))),
-                  )}
+              {(assessment?.placements.find(p => p.placement_id === placement.id)?.envelopes ?? bin.preview_tools.map(tool => ({
+                points: tool.points.map(p => binPointToDrawerMm(p, placement, bin)),
+                interior_rings: tool.interior_rings.map(ring => ring.map(p => binPointToDrawerMm(p, placement, bin))),
+              }))).map((tool, index) => (
+                <path key={index} d={polygonPathData(tool.points, tool.interior_rings)}
                   fillRule="evenodd"
                   fill="var(--color-tool-fill)"
                   stroke="var(--color-tool-stroke)"

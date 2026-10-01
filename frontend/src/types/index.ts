@@ -161,6 +161,7 @@ export interface BinConfig extends BinDefaults {
 export interface Tool {
   id: string
   name: string
+  thickness_mm?: number | null
   points: Point[]
   finger_holes: FingerHole[]
   interior_rings: Point[][]
@@ -192,6 +193,7 @@ export interface ToolImageContext {
 export interface ToolSummary {
   id: string
   name: string
+  thickness_mm?: number | null
   created_at: string | null
   point_count: number
   points: Point[]
@@ -231,10 +233,18 @@ export interface ProjectBinPlacement {
   rotation: number
   /** #rrggbb highlight colour, or null for the default bin colour. */
   color: string | null
+  support_id?: string | null
 }
 
 /** One drawer plan inside a project: a grid plus the bins placed on it. */
-export interface ProjectSketch {
+export interface ContainerLimits {
+  container_width_mm?: number | null
+  container_depth_mm?: number | null
+  container_height_mm?: number | null
+  safety_clearance_mm?: number
+}
+
+export interface ProjectSketch extends ContainerLimits {
   id: string
   name: string
   target_grid_x: number | null
@@ -332,6 +342,93 @@ export interface BinSummary {
   height_units: number
   half_grid_base: boolean
   preview_tools: BinPreviewTool[]
+}
+
+export interface ToolEnvelope {
+  id: string
+  tool_id: string
+  name: string
+  points: Point[]
+  interior_rings: Point[][]
+  thickness_mm: number | null
+  effective_depth_mm: number | null
+  resting_z_mm: number | null
+  seating_verified: boolean
+  insert_height_mm: number
+  top_mm: number | null
+  clearance_mm: number | null
+}
+
+export interface FitViolation {
+  code: string
+  message: string
+  tool_id?: string
+  placement_id?: string
+  other_placement_id?: string
+  clearance_mm?: number
+}
+
+export interface BinHeightAssessment {
+  status: 'verified' | 'uncertain' | 'invalid'
+  external_height_mm: number
+  stack_increment_mm: number
+  clearance_mm: number | null
+  limiting_tool_id: string | null
+  missing_tool_ids: string[]
+  envelopes: ToolEnvelope[]
+  violations: FitViolation[]
+}
+
+export interface HeightProposal {
+  strategy: 'deeper_pockets' | 'raised_rim'
+  complete: boolean
+  bin_config?: BinConfig | null
+  placed_tools?: PlacedTool[]
+  override_changes?: { id: string; from_mm: number; to_mm: number }[]
+  external_height_mm?: number
+  clearance_mm?: number
+  reason: string | null
+}
+
+export interface BinHeightPlanning {
+  assessment: BinHeightAssessment
+  alternatives: HeightProposal[]
+}
+
+export interface PlanPlacementAssessment {
+  placement_id: string
+  root_id: string
+  z_mm: number
+  top_mm: number
+  headroom_mm: number | null
+  external_height_mm: number
+  support_compatible: boolean | null
+  clearance_mm: number | null
+  limiting_tool_id: string | null
+  envelopes: ToolEnvelope[]
+}
+
+export interface ToolboxAssessment {
+  status: 'verified' | 'uncertain' | 'invalid'
+  geometry_revision: string
+  bins: BinSummary[]
+  violations: FitViolation[]
+  unresolved: string[]
+  missing_tool_ids: string[]
+  unhoused_tool_ids: string[]
+  placements: PlanPlacementAssessment[]
+  grid_x: number | null
+  grid_y: number | null
+  width_mm: number | null
+  depth_mm: number | null
+  height_mm: number | null
+  safety_clearance_mm: number
+  residual_width_mm: number | null
+  residual_depth_mm: number | null
+  occupied_floor_units: number
+  free_cells: { x: number; y: number; w: number; h: number }[]
+  free_regions: { area_units: number; cells: Point[] }[]
+  stacks: { root_id: string; headroom_mm: number | null }[]
 }
 
 export interface AuthStatus {

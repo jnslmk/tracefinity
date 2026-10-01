@@ -1,7 +1,9 @@
 'use client'
 
+import { useEffect, useState } from 'react'
+import { planBinHeight } from '@/lib/api'
 import { Info } from 'lucide-react'
-import type { BinConfig } from '@/types'
+import type { BinConfig, BinHeightPlanning, HeightProposal, PlacedTool } from '@/types'
 import { NumericInput } from '@/components/NumericInput'
 import { createPartialBinsValues } from '@/lib/binDefaults'
 import { maxGridUnitsForOtherAxis } from '@/lib/constants'
@@ -430,5 +432,68 @@ export function BinConfigurator({ config, onChange, autoSize, onAutoSizeChange }
           )}
       </div>
     </div>
+  )
+}
+
+export function BinHeightPlanner({ binId, config, placedTools, onApply }: {
+  binId: string
+  config: BinConfig
+  placedTools: PlacedTool[]
+  onApply: (proposal: HeightProposal) => Promise<void>
+}) {
+  const [gap, setGap] = useState(0)
+  const [planning, setPlanning] = useState<BinHeightPlanning | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [applying, setApplying] = useState(false)
+  const [revision, setRevision] = useState(0)
+  useEffect(() => {
+    const refresh = () => setRevision(value => value + 1)
+    window.addEventListener('focus', refresh)
+    return () => window.removeEventListener('focus', refresh)
+  }, [])
+  useEffect(() => {
+    let cancelled = false
+    setPlanning(null)
+    setError(null)
+    const timer = setTimeout(() => {
+      planBinHeight(binId, config, placedTools, gap).then(result => {
+        if (!cancelled) setPlanning(result)
+      }).catch(err => { if (!cancelled) setError(err instanceof Error ? err.message : 'Height assessment failed') })
+    }, 200)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [binId, config, placedTools, gap, revision])
+  return (
+    <section className="glass rounded-[10px] p-3 text-[11px] text-text-secondary space-y-2" aria-label="Fit height to tools">
+      <h3 className="font-semibold text-text-primary">Fit height to tools</h3>
+      <label className="block">Safety clearance (mm)
+        <input aria-label="Bin safety clearance (mm)" type="number" min="0" step="0.1" value={gap}
+          className="w-full bg-elevated border border-border rounded px-2 py-1"
+          onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v) && v >= 0) setGap(v) }} />
+      </label>
+      <p>Zero is not a manufacturing tolerance. Physical checks remain necessary.</p>
+      {error && <p role="alert">{error}</p>}
+      {!planning && !error && <p role="status">Assessing current geometry…</p>}
+      {planning && <>
+        <p role="status">Stackability: {planning.assessment.status}. Current clearance: {planning.assessment.clearance_mm?.toFixed(2) ?? 'unknown'} mm.</p>
+        <p>External height {planning.assessment.external_height_mm.toFixed(2)} mm; stacking increment {planning.assessment.stack_increment_mm.toFixed(2)} mm.</p>
+        {planning.assessment.envelopes.map(tool => <p key={tool.id}>
+          <a className="text-accent" href={`/tools/${tool.tool_id}`}>{tool.name}</a>: {!tool.seating_verified ? 'cannot establish pocket-floor seating' : tool.thickness_mm === null ? 'needs thickness measurement' : `${tool.thickness_mm} mm thick; effective cutout ${tool.effective_depth_mm?.toFixed(2) ?? 'unavailable'} mm; clearance ${tool.clearance_mm?.toFixed(2)} mm`}
+          {tool.tool_id === planning.assessment.limiting_tool_id ? ' (limiting tool)' : ''}
+        </p>)}
+        {planning.assessment.violations.map((violation, i) => <p key={i}>{violation.message}</p>)}
+        {planning.alternatives.map(proposal => <div key={proposal.strategy} className="border-t border-border pt-2 space-y-1">
+          <strong>{proposal.strategy === 'deeper_pockets' ? 'Deeper pockets / taller body' : 'Raised rim / existing pockets'}</strong>
+          {proposal.bin_config ? <>
+            <p>{proposal.complete ? 'Minimum for measured tools' : 'Incomplete: unknown tools prevent a complete minimum'}: body {proposal.bin_config.height_units}u, raised rim {proposal.bin_config.rim_units}u, cutout {proposal.bin_config.cutout_depth.toFixed(2)} mm, physical height {proposal.external_height_mm?.toFixed(2)} mm.</p>
+            <p>Stacking lip enabled; minimum clearance {proposal.clearance_mm?.toFixed(2) ?? 'unknown'} mm. Applying updates this shared bin, so every linked plan is reassessed.</p>
+            {proposal.override_changes?.map(change => <p key={change.id}>Cutout {change.id}: {change.from_mm} → {change.to_mm} mm (explicit override change)</p>)}
+            <button type="button" className="btn-secondary w-full px-2 py-1" disabled={applying} onClick={async () => {
+              setApplying(true)
+              try { await onApply(proposal) } catch (err) { setError(err instanceof Error ? err.message : 'Could not apply proposal') } finally { setApplying(false) }
+            }}>Apply {proposal.strategy === 'deeper_pockets' ? 'deeper pockets' : 'raised rim'}</button>
+          </> : <p>{proposal.reason}</p>}
+        </div>)}
+      </>}
+    </section>
   )
 }

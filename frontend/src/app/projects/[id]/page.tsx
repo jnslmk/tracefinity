@@ -28,6 +28,7 @@ import { ToolSummaryButton, ToolSummaryItem } from '@/components/ToolSummaryItem
 import { useDeleteConfirmation } from '@/hooks/useDeleteConfirmation'
 import { binDefaultsFromConfig, buildBinConfig, getDefaultBinConfig, getDefaultBinDefaults } from '@/lib/binDefaults'
 import { projectScopedHref } from '@/lib/projectNavigation'
+import { GRID_UNIT } from '@/lib/constants'
 import {
   binLabel,
   getUniqueBinTools,
@@ -960,7 +961,9 @@ export default function ProjectPage() {
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
               {project.sketches.map(sketch => {
                 const placedBinIds = new Set(sketch.bin_layout.map(placement => placement.bin_id))
-                const sized = sketch.target_grid_x !== null && sketch.target_grid_y !== null
+                const width = sketch.container_width_mm ?? (sketch.target_grid_x === null ? null : sketch.target_grid_x * GRID_UNIT)
+                const depth = sketch.container_depth_mm ?? (sketch.target_grid_y === null ? null : sketch.target_grid_y * GRID_UNIT)
+                const sized = width !== null && depth !== null
                 return (
                   <div key={sketch.id} className="glass rounded-[8px] px-3 py-2 flex items-center gap-2">
                     <button
@@ -969,7 +972,8 @@ export default function ProjectPage() {
                     >
                       <span className="block text-xs text-text-primary truncate">{sketch.name}</span>
                       <span className="block text-[10px] text-text-muted">
-                        {sized ? `${sketch.target_grid_x}x${sketch.target_grid_y} units` : 'No drawer size'}
+                        {sized ? `${width} × ${depth} mm` : 'No drawer size'}
+                        {sketch.container_height_mm != null ? ` · ${sketch.container_height_mm} mm usable height` : ' · height unknown'}
                         {' · '}
                         {sketch.bin_layout.length} placement{sketch.bin_layout.length !== 1 ? 's' : ''}
                         {placedBinIds.size > 0 ? ` · ${placedBinIds.size} of ${projectBins.length} bins` : ''}

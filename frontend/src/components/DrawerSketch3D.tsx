@@ -2,13 +2,14 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
-import { Bounds, GizmoHelper, GizmoViewport, OrbitControls, useBounds } from '@react-three/drei'
+import { Bounds, GizmoHelper, GizmoViewport, Html, OrbitControls, useBounds } from '@react-three/drei'
 import * as THREE from 'three'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { ArrowRight, ArrowUp, Box, CircleDot, RotateCcw, Triangle } from 'lucide-react'
-import type { BinSummary, ProjectBinPlacement } from '@/types'
+import type { BinSummary, ProjectBinPlacement, ToolEnvelope, ToolboxAssessment } from '@/types'
 import { GRID_UNIT } from '@/lib/constants'
-import { DEFAULT_BIN_COLOR, binFootprint, binHeightMm, gridLines, placementRect, rotationOffsetMm } from '@/lib/drawerLayout'
+import { DEFAULT_BIN_COLOR, binFootprint, gridLines, placementRect, rotationOffsetMm } from '@/lib/drawerLayout'
+import { useBinStlUrls } from '@/hooks/useBinStlUrls'
 
 interface Props {
   bins: Map<string, BinSummary>
@@ -18,8 +19,7 @@ interface Props {
   selectedPlacementId: string | null
   overlapping: Set<string>
   outOfBounds: Set<string>
-  /** STL url per bin id; bins without one fall back to a plain block. */
-  stlUrls: Map<string, string>
+  assessment: ToolboxAssessment | null
   onSelect: (placementId: string | null) => void
 }
 
@@ -81,11 +81,13 @@ function DrawerFloor({ drawerX, drawerY }: { drawerX: number; drawerY: number })
  * sits at the origin, so it lines up with the drawer grid like the 2D sketch.
  * Rendering matches the bin page preview: solid body plus sharp contour lines.
  */
-function BinStlModel({ url, color, renderMode, fallback }: {
+function BinStlModel({ url, color, renderMode, fallback, widthMm, depthMm }: {
   url: string
   color: string
   renderMode: RenderMode
   fallback: React.ReactNode
+  widthMm: number
+  depthMm: number
 }) {
   const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null)
   const [edges, setEdges] = useState<THREE.EdgesGeometry | null>(null)
@@ -101,9 +103,7 @@ function BinStlModel({ url, color, renderMode, fallback }: {
         if (disposed) { geo.dispose(); return }
         // STL is z-up; match the drawer axes and put the corner at the origin
         geo.rotateX(-Math.PI / 2)
-        geo.computeBoundingBox()
-        const box = geo.boundingBox!
-        geo.translate(-box.min.x, -box.min.y, -box.min.z)
+        geo.translate(widthMm / 2, 0, depthMm / 2)
         geo.computeVertexNormals()
         loadedGeo = geo
         loadedEdges = new THREE.EdgesGeometry(geo, 30)
@@ -125,7 +125,7 @@ function BinStlModel({ url, color, renderMode, fallback }: {
       setGeometry(null)
       setEdges(null)
     }
-  }, [url])
+  }, [url, widthMm, depthMm])
 
   if (!geometry) return <>{fallback}</>
 
@@ -170,6 +170,7 @@ function PlacedBin({
   stlUrl,
   renderMode,
   onSelect,
+  physical,
 }: {
   bin: BinSummary
   placement: ProjectBinPlacement
@@ -177,18 +178,22 @@ function PlacedBin({
   stlUrl?: string
   renderMode: RenderMode
   onSelect: (placementId: string) => void
+  physical: { z_mm: number; external_height_mm: number }
 }) {
   const rect = placementRect(placement, bin)
   const footprint = binFootprint(bin, placement.rotation)
   const offset = rotationOffsetMm(placement.rotation, bin)
-  const block = (
+  const block = (<>
     <BinBlock
       widthMm={bin.grid_x * GRID_UNIT}
       depthMm={bin.grid_y * GRID_UNIT}
-      heightMm={binHeightMm(bin.height_units)}
+      heightMm={physical.external_height_mm}
       color={color}
     />
-  )
+    <Html center position={[bin.grid_x * GRID_UNIT / 2, physical.external_height_mm + 5, bin.grid_y * GRID_UNIT / 2]}>
+      <span className="text-[10px] bg-surface text-text-primary whitespace-nowrap px-1">Approximate block: geometry pending or unavailable</span>
+    </Html>
+  </>)
 
   const outlinePositions = useMemo(() => {
     const w = footprint.w * GRID_UNIT
@@ -203,13 +208,13 @@ function PlacedBin({
 
   return (
     <group
-      position={[rect.x * GRID_UNIT, 0, rect.y * GRID_UNIT]}
+      position={[rect.x * GRID_UNIT, physical.z_mm, rect.y * GRID_UNIT]}
       onClick={event => { event.stopPropagation(); onSelect(placement.id) }}
     >
       {/* rotate the model about the drawer's vertical axis, then shift it back into its footprint */}
       <group position={[offset.dx, 0, offset.dz]} rotation={[0, -placement.rotation * Math.PI / 180, 0]}>
         {stlUrl
-          ? <BinStlModel url={stlUrl} color={color} renderMode={renderMode} fallback={block} />
+          ? <BinStlModel url={stlUrl} color={color} renderMode={renderMode} fallback={block} widthMm={bin.grid_x * GRID_UNIT} depthMm={bin.grid_y * GRID_UNIT} />
           : block}
       </group>
       {/* footprint outline keeps overlaps readable even behind a solid model */}
@@ -221,6 +226,48 @@ function PlacedBin({
       </lineLoop>
     </group>
   )
+}
+
+function ToolEnvelopeMesh({ envelope, insert = false }: { envelope: ToolEnvelope; insert?: boolean }) {
+  const height = insert ? envelope.insert_height_mm : envelope.thickness_mm
+  const geometry = useMemo(() => {
+    if (height === null || height <= 0 || envelope.resting_z_mm === null || envelope.points.length < 3) return null
+    const shape = new THREE.Shape(envelope.points.map(p => new THREE.Vector2(p.x, -p.y)))
+    shape.holes = envelope.interior_rings.map(ring => new THREE.Path(ring.map(p => new THREE.Vector2(p.x, -p.y))))
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false, steps: 1 })
+    geo.rotateX(-Math.PI / 2)
+    return geo
+  }, [envelope, height])
+  useEffect(() => () => geometry?.dispose(), [geometry])
+  if (!geometry || height === null || envelope.resting_z_mm === null) return null
+  const center = envelope.points.reduce((sum, p) => ({ x: sum.x + p.x / envelope.points.length, y: sum.y + p.y / envelope.points.length }), { x: 0, y: 0 })
+  return <group position={[0, envelope.resting_z_mm - (insert ? height! : 0), 0]}>
+    <mesh geometry={geometry}><meshStandardMaterial color={insert ? '#81bce0' : '#e5b854'} transparent opacity={0.35} depthWrite={false} side={THREE.DoubleSide} /></mesh>
+    <Html center position={[center.x, height! + 3, center.y]} style={{ pointerEvents: 'none' }}>
+      <span className="text-[10px] whitespace-nowrap bg-surface/90 text-text-primary px-1">{insert ? 'Insert for ' : ''}{envelope.name} — conservative envelope</span>
+    </Html>
+  </group>
+}
+
+function DrawerModels({ bins, placements, selectedPlacementId, overlapping, outOfBounds, assessment, renderMode, onSelect }: Props & { assessment: ToolboxAssessment; renderMode: RenderMode }) {
+  const { stlUrls, pendingCount } = useBinStlUrls(placements.map(p => p.bin_id), true)
+  return <>
+    {placements.map(placement => {
+      const bin = bins.get(placement.bin_id)
+      const physical = assessment.placements.find(p => p.placement_id === placement.id)
+      if (!bin || !physical) return null
+      const base = overlapping.has(placement.id) ? BIN_OVERLAP_COLOR : outOfBounds.has(placement.id) ? BIN_OUT_OF_BOUNDS_COLOR : placement.color || DEFAULT_BIN_COLOR
+      return <group key={placement.id}>
+        <PlacedBin bin={bin} placement={placement} physical={physical} color={selectedPlacementId === placement.id ? selectedColor(base) : base}
+          stlUrl={stlUrls.get(bin.id)} renderMode={renderMode} onSelect={onSelect} />
+        {physical.envelopes.map(envelope => <ToolEnvelopeMesh key={envelope.id} envelope={envelope} />)}
+        {physical.envelopes.filter(envelope => envelope.insert_height_mm > 0).map(envelope => <ToolEnvelopeMesh key={`insert-${envelope.id}`} envelope={envelope} insert />)}
+      </group>
+    })}
+    <Html position={[0, 0, 0]} style={{ pointerEvents: 'none' }}>
+      <span className="text-[10px] whitespace-nowrap bg-surface text-text-primary">{pendingCount ? `Generating ${pendingCount} models` : 'Blocks, if present, are not verified geometry'}</span>
+    </Html>
+  </>
 }
 
 // sits inside <Bounds>, listens for view commands via custom event
@@ -288,7 +335,7 @@ export function DrawerSketch3D({
   selectedPlacementId,
   overlapping,
   outOfBounds,
-  stlUrls,
+  assessment,
   onSelect,
 }: Props) {
   const [renderMode, setRenderMode] = useState<RenderMode>('solid')
@@ -314,28 +361,13 @@ export function DrawerSketch3D({
           <Bounds clip margin={1.15}>
             <group position={[-widthMm / 2, 0, -depthMm / 2]}>
               <DrawerFloor drawerX={drawerX} drawerY={drawerY} />
-              {placements.map(placement => {
-                const bin = bins.get(placement.bin_id)
-                if (!bin) return null
-                const base = overlapping.has(placement.id)
-                  ? BIN_OVERLAP_COLOR
-                  : outOfBounds.has(placement.id)
-                    ? BIN_OUT_OF_BOUNDS_COLOR
-                    : placement.color || DEFAULT_BIN_COLOR
-                // selection lightens the bin's own colour instead of replacing it
-                const color = selectedPlacementId === placement.id ? selectedColor(base) : base
-                return (
-                  <PlacedBin
-                    key={placement.id}
-                    bin={bin}
-                    placement={placement}
-                    color={color}
-                    stlUrl={stlUrls.get(bin.id)}
-                    renderMode={renderMode}
-                    onSelect={onSelect}
-                  />
-                )
-              })}
+              {assessment && <DrawerModels key={assessment.geometry_revision} bins={bins} placements={placements}
+                drawerX={drawerX} drawerY={drawerY} selectedPlacementId={selectedPlacementId} overlapping={overlapping}
+                outOfBounds={outOfBounds} assessment={assessment} renderMode={renderMode} onSelect={onSelect} />}
+              {assessment?.height_mm != null && <mesh position={[widthMm / 2, assessment.height_mm, depthMm / 2]}>
+                <boxGeometry args={[widthMm, .3, depthMm]} />
+                <meshStandardMaterial color="#e57474" transparent opacity={.12} depthWrite={false} />
+              </mesh>}
             </group>
             <CameraController />
           </Bounds>
@@ -355,6 +387,9 @@ export function DrawerSketch3D({
       </Canvas>
 
       <div className="absolute top-3 left-3 flex gap-1">
+        <p className="text-[11px] bg-surface/90 text-text-primary p-1 max-w-64">
+          {!assessment ? 'Assessment pending: preview is not verified.' : `Ceiling: ${assessment.height_mm ?? 'unknown'} mm. Gold tools and blue inserts are labelled conservative envelopes, not reconstructed solids.`}
+        </p>
         {viewButtons.map(({ view, icon: Icon, label }) => (
           <button
             key={view}

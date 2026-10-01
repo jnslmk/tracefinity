@@ -91,7 +91,7 @@ The **Drawer plans** section at the bottom of the project page lists every plan 
 
 ### Setting the drawer size
 
-The drawer size is optional. Click **Set drawer size** and enter the width and depth in gridfinity units (1 to 40, in 0.5 steps). The sidebar shows the equivalent millimetres, so a 420 x 336 mm drawer is 10 x 8 units. **Clear drawer size** removes the plan again.
+The drawer size is optional. **Set drawer size** enters width and depth in Gridfinity units (1 to 40, in 0.5 steps). You can instead enter usable width/depth in millimetres under **Usable container measurements** (up to the existing 1680 mm planner limit). Millimetres take precedence over grid controls on each axis. **Clear physical limits** restores the saved grid-only constraints; clearing dimensions does not delete placements.
 
 Bins snap to whole gridfinity units. A bin configured with a **half-grid base** snaps to half units instead, matching the 21mm cells it actually sits on -- there is nothing to switch on in the planner.
 
@@ -114,14 +114,88 @@ Each placed bin shows the outlines of the tools it contains and a small stack of
 
 ### Auto arrange
 
-**Auto arrange** packs all project bins into the drawer, largest first, rotating them when that helps. Bins that do not fit are left in the list as unplaced.
+**Auto arrange** packs independent floor-level placements, largest first, rotating them when that helps. Established stacks stay intact and fixed; they reserve only their floor-root footprint. Existing placements that do not fit retain their position with a warning.
 
 ### Space usage
 
-The sidebar tracks how many grid units are used and free, how many bins are placed, and warns when bins overlap or stick out of the drawer. Overlapping bins are outlined in red, bins outside the drawer in amber.
+The sidebar tracks floor-root footprint **union**, free half-grid cells and connected available regions. Stacked members do not double-count floor space. Residual edge strips in a non-grid-aligned container are shown separately, never rounded upward. Independent roots that overlap still collide; aligned supported members in the same stack are assessed by their support relationship. Free area is a planning indicator, not a promise that another tool or bin can fit.
 
 ### 2D and 3D
 
 Switch between the top-down sketch and a 3D view with the buttons above the canvas. The 3D view renders the actual bin models, the same geometry you would print, so you can check tool pockets, heights and reach. It uses the same controls as the bin preview: camera presets (home, top, front, right, fit) and a toggle that switches from solid models to contour lines only. Models are generated on demand the first time you open the 3D view; until a model is ready, the bin shows as a translucent block.
 
 The plan saves automatically and is stored with the project.
+
+### Closed-lid height and safety clearance
+
+Name a plan for the toolbox or layout variant. Enter usable floor-to-closed-lid
+height in millimetres or in height units: **10u converts to 70 mm**. Height is saved
+in millimetres; nominal unit sums do not prove that a loaded stack fits.
+The floor datum is the supporting surface beneath the lowest bin bases.
+Subtract the elevation of an installed baseplate or liner from the measured
+internal height; Tracefinity does not model the baseplate.
+
+Set a non-negative **Safety clearance** for measurement uncertainty and practical
+clearance. Zero preserves old-plan behaviour but is not a manufacturing tolerance.
+The gap applies between a tool envelope and an upper bin, and between contents
+and the ceiling.
+
+### Manual stacks and accessible actions
+
+Select a placed floor bin and choose **Stack on** another placement. Only aligned,
+matching rectangular footprints after rotation with verified mating bases and an
+intact lower stacking lip are supported. Full- and half-grid bases cannot be mixed.
+Partial-bin interfaces whose support cannot be established are not verified.
+The dropdown checks support on the server; rejected operations leave the saved
+arrangement intact. Upper bins are positioned from the generated mating geometry,
+not from editable Z coordinates or sums of exterior mesh heights.
+
+Dragging, rotating or changing **Stack X/Y** moves the complete rooted stack.
+Duplicating one selected bin creates an independent floor placement, not a copy
+of the entire stack. **Move up/down in stack** explicitly reorders neighbors and
+rechecks interfaces. Removing a member with bins above it offers **Remove upper
+sub-stack** or **Remove and reconnect**; reconnect checks the remaining interface.
+Removing all copies of a bin offers the same choice when upper members are affected.
+Detaching/deleting a library bin deterministically removes its placed copies and
+their upper sub-stacks, but does not delete the upper library bins.
+
+The **Select every stack member** list reaches lower bins hidden from above.
+It works with keyboard focus and Enter; all stack actions also have textual
+controls, and Stack X/Y provides movement without dragging. Selection diagnostics
+show elevation, limiting tools, current clearance and support compatibility.
+
+### Fit diagnostics and previews
+
+The backend derives fit from current library thickness, pocket overrides,
+depth clamps, contrast inserts, raised rims and generated base/lip datums:
+
+- **Verified**: relevant limits and measurements are known, every project tool is
+  housed in a bin actually placed in this plan, and all checks pass.
+- **Uncertain**: measurements, limits or housing remain unresolved.
+- **Invalid**: a known boundary, overlap, support, tool or lid violation exists.
+  Missing measurements are listed separately and never hide a known failure.
+
+The plan reports each stack's remaining headroom and project tools **not housed
+in this plan**. Linking a bin elsewhere does not complete this toolbox.
+Changes to shared tools and bins are re-evaluated when returning to the planner;
+**Reassess shared tools and bins** refreshes an already-open plan explicitly.
+Only measurements, limits and placement relationships persist, not cached fit
+results. Old tools remain unmeasured and old floor-only plans still load.
+
+**Side clearance** shows elevations, labelled conservative tool envelopes and the
+closed-lid ceiling. **3D** shows actual generated bin meshes at assembled mating
+positions, extruded scanned outlines at their resting elevations and the ceiling.
+Gold tool envelopes are approximations of maximum thickness, not reconstructed
+3D tools. A placeholder block is explicitly labelled pending/unavailable geometry,
+not a verified physical preview. Physically check measurements and printed mating
+parts before printing the complete set.
+
+Blue insert envelopes use the known insert thickness and floor position, including
+when the tool itself is still unmeasured. They are conservative contours, not claims
+that the separately printed insert STL has been loaded.
+
+If a scanned outline crosses the bin wall, its cutout is clipped away, or printed
+material prevents it reaching the pocket floor, the plan reports a known seating
+violation. Its resting elevation is left unresolved and no floor-level tool or
+insert envelope is drawn. Correct the tool placement or bin footprint before
+requesting a height proposal; increasing body height alone cannot fix that fit.

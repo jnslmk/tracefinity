@@ -68,3 +68,42 @@ If the bin dimensions exceed your configured bed size or the bin model is separa
 - Individual STLs for each piece (also available as a ZIP).
 - The full merged STL for large-format printers.
 - A split preview in the 3D viewer.
+
+## Loaded-bin height planning
+
+Record each library tool's maximum **resting thickness in the scanned
+orientation** in its tool editor. Unknown measurements remain unknown, including
+old tools. The bin's **Fit height to tools** panel identifies the limiting tool,
+effective cutout depths, current upper-bin clearance, standalone exterior height
+and assembled stacking increment. These are different physical datums.
+
+Depth assessment uses the same generator rules: per-tool override before global
+cutout depth, insert allowance, the physical base/floor clamp and the normal 5 mm
+minimum when the physical limit permits it. A contrast insert raises the resting
+surface by its printed thickness after pocket clamping.
+Both global depths and explicit overrides receive the insert allowance exactly once
+inside the generator, before clamping. Proposals honor this rule and never ignore
+a shallow override or double-add its insert allowance.
+Known insert interference is reported even while tool thickness is unknown.
+If the scanned outline cannot seat in the printed, clipped pocket, fix its position
+or bin footprint first; the planner does not propose a false floor-level fit.
+
+Inspect either alternative before applying it:
+
+- **Deeper pockets / taller body** chooses the smallest supported body height
+  that recesses measured tools enough. Any necessary increase to an explicit
+  per-tool override is shown before applying.
+- **Raised rim / existing pockets** retains body and pocket settings and chooses
+  the smallest supported rim that clears the measured tool envelopes.
+
+The panel shows proposed body/rim units, cutout settings, changed overrides,
+resulting physical height and clearance. **Apply** changes the existing
+configuration and follows normal auto-save and STL generation. Inspect save or
+generation errors before leaving. It does not silently change bins merely by
+opening the panel. Partial interfaces are not claimed to be stackable, and
+unsupported height/depth limits return an explanation rather than a fake fit.
+
+Missing measurements make known-tool proposals **incomplete**, not a complete
+minimum-height recommendation. The plan re-evaluates current measurements and
+configuration; a taller bin that becomes stackable can still interfere with the
+container lid. Set a practical safety gap, and test printed parts physically.

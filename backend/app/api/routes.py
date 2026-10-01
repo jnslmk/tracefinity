@@ -70,6 +70,7 @@ from app.models.schemas import (
     SessionListResponse,
     SessionSummary,
     SessionUpdateRequest,
+    StackActionRequest,
     StatusResponse,
     Tool,
     ToolDetailResponse,
@@ -103,6 +104,7 @@ from app.services.project_service import (
     remove_bin_from_project,
     remove_project_from_tools,
     repair_project_links,
+    transform_moved_stacks,
     validate_bin_layout,
 )
 from app.services.project_store import ProjectStore
@@ -111,6 +113,14 @@ from app.services.stl_generator_manifold import STL_GEOMETRY_VERSION, ManifoldST
 from app.services.store_errors import StoreClosedError
 from app.services.tool_namer import name_polygons
 from app.services.tool_store import ToolStore
+from app.services.toolbox_planning import (
+    assess_bin,
+    assess_plan,
+    footprint,
+    generation_polygons,
+    height_proposals,
+    support_problem,
+)
 from app.services.tracer_registry import TRACER_LABELS, tracer_kind, validate_tracer_ids
 
 router = APIRouter()
@@ -1500,6 +1510,7 @@ async def list_tools(request: Request, user_id: str = Depends(get_user_id)):
         summaries.append(ToolSummary(
             id=tid,
             name=tool.name,
+            thickness_mm=tool.thickness_mm,
             created_at=tool.created_at,
             point_count=len(tool.points),
             points=tool.points,
@@ -1541,6 +1552,9 @@ async def update_tool(request: Request, tool_id: str, req: ToolUpdateRequest, us
     tool = user_tools.get(tool_id)
     if not tool:
         raise HTTPException(status_code=404, detail="tool not found")
+    tool = tool.model_copy(deep=True)
+    if "thickness_mm" in req.model_fields_set:
+        tool.thickness_mm = req.thickness_mm
 
     if req.name is not None:
         tool.name = req.name
@@ -1876,6 +1890,7 @@ async def create_project_sketch(
         name=name,
         target_grid_x=req.target_grid_x,
         target_grid_y=req.target_grid_y,
+        **req.model_dump(include={"container_width_mm", "container_depth_mm", "container_height_mm", "safety_clearance_mm"}),
         created_at=now,
         updated_at=now,
     )
@@ -1897,6 +1912,7 @@ async def update_project_sketch(
     project = project_store.get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="project not found")
+    project = project.model_copy(deep=True)
     sketch = get_sketch(project, sketch_id)
     _, _, user_bins = get_stores(user_id)
 
@@ -1907,7 +1923,8 @@ async def update_project_sketch(
             raise HTTPException(status_code=400, detail="sketch name is required")
     layout = None
     if "bin_layout" in req.model_fields_set:
-        layout = validate_bin_layout(project, req.bin_layout or [], user_bins)
+        moved = transform_moved_stacks(sketch.bin_layout, req.bin_layout or [])
+        layout = validate_bin_layout(project, moved, user_bins)
 
     if name is not None:
         sketch.name = name
@@ -1915,6 +1932,9 @@ async def update_project_sketch(
         sketch.target_grid_x = req.target_grid_x
     if "target_grid_y" in req.model_fields_set:
         sketch.target_grid_y = req.target_grid_y
+    for field in ("container_width_mm", "container_depth_mm", "container_height_mm", "safety_clearance_mm"):
+        if field in req.model_fields_set:
+            setattr(sketch, field, getattr(req, field))
     if layout is not None:
         sketch.bin_layout = layout
 
@@ -1922,6 +1942,120 @@ async def update_project_sketch(
     project.updated_at = sketch.updated_at
     project_store.set(project_id, project)
     return sketch
+
+
+@router.post("/bin-projects/{project_id}/sketches/{sketch_id}/placements/{placement_id}/stack-action", response_model=ProjectSketch)
+async def project_stack_action(project_id: str, sketch_id: str, placement_id: str, req: StackActionRequest, user_id: str = Depends(get_user_id)):
+    store = get_project_store(user_id)
+    original = store.get(project_id)
+    if not original:
+        raise HTTPException(status_code=404, detail="project not found")
+    project = original.model_copy(deep=True)
+    sketch = get_sketch(project, sketch_id)
+    _, user_tools, user_bins = get_stores(user_id)
+    layout = validate_bin_layout(project, req.bin_layout if req.bin_layout is not None else sketch.bin_layout, user_bins)
+    layout = [p.model_copy(deep=True) for p in layout]
+    previous_interfaces = {p.id: (p.support_id, p.x, p.y, p.rotation) for p in layout}
+    by_id = {p.id: p for p in layout}
+    selected = by_id.get(placement_id)
+    if not selected:
+        raise HTTPException(status_code=404, detail="placement not found")
+    child = next((p for p in layout if p.support_id == selected.id), None)
+    if req.action == "remove_substack":
+        removed = {p.id for p in layout if p.bin_id == selected.bin_id} if req.remove_bin_copies else {selected.id}
+        while True:
+            descendants = {p.id for p in layout if p.support_id in removed}
+            if descendants <= removed:
+                break
+            removed.update(descendants)
+        layout = [p for p in layout if p.id not in removed]
+    elif req.action == "remove_reconnect":
+        removed = {p.id for p in layout if p.bin_id == selected.bin_id} if req.remove_bin_copies else {selected.id}
+        for p in layout:
+            while p.support_id in removed:
+                p.support_id = by_id[p.support_id].support_id
+        layout = [p for p in layout if p.id not in removed]
+    elif req.action == "stack_on":
+        support = by_id.get(req.support_id)
+        if not support or support.id == selected.id:
+            raise HTTPException(status_code=400, detail="select another placement as support")
+        if selected.support_id:
+            raise HTTPException(status_code=400, detail="only a floor root can be stacked")
+        members = {selected.id}
+        while True:
+            descendants = {p.id for p in layout if p.support_id in members}
+            if descendants <= members:
+                break
+            members.update(descendants)
+        for p in layout:
+            if p.id in members:
+                p.x, p.y = support.x, support.y
+                if footprint(p, user_bins.get(p.bin_id).bin_config) != footprint(support, user_bins.get(support.bin_id).bin_config):
+                    p.rotation = (p.rotation + 90) % 360
+        selected.support_id = support.id
+    else:
+        lower = selected if req.action == "move_up" else by_id.get(selected.support_id)
+        upper = child if req.action == "move_up" else selected
+        if not lower or not upper:
+            raise HTTPException(status_code=400, detail="no neighboring stack member in that direction")
+        above = next((p for p in layout if p.support_id == upper.id), None)
+        upper.support_id, lower.support_id = lower.support_id, upper.id
+        if above:
+            above.support_id = lower.id
+    layout = validate_bin_layout(project, layout, user_bins)
+    bins = user_bins.all()
+    for p in layout:
+        if p.support_id and previous_interfaces.get(p.id) != (p.support_id, p.x, p.y, p.rotation):
+            lower = next(q for q in layout if q.id == p.support_id)
+            lower_data = bins[lower.bin_id].model_copy(deep=True)
+            sync_placed_tools(lower_data, user_tools)
+            physical = assess_bin(lower_data, user_tools.all(), upper_config=bins[p.bin_id].bin_config,
+                                  relative_rotation=(p.rotation-lower.rotation) % 360)
+            problem = support_problem(lower, p, bins, physical)
+            if problem:
+                raise HTTPException(status_code=400, detail=problem)
+    sketch.bin_layout = layout
+    sketch.updated_at = project.updated_at = _now_iso()
+    store.set(project_id, project)
+    return sketch
+
+
+@router.post("/bin-projects/{project_id}/sketches/{sketch_id}/assessment")
+async def assess_project_sketch(
+    project_id: str, sketch_id: str,
+    req: ProjectSketchUpdateRequest = ProjectSketchUpdateRequest(),
+    user_id: str = Depends(get_user_id),
+):
+    project = get_project_store(user_id).get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+    sketch = get_sketch(project, sketch_id).model_copy(deep=True)
+    _, user_tools, user_bins = get_stores(user_id)
+    for field, value in req.model_dump(exclude_unset=True, exclude={"bin_layout"}).items():
+        setattr(sketch, field, value)
+    if "bin_layout" in req.model_fields_set:
+        sketch.bin_layout = validate_bin_layout(project, req.bin_layout or [], user_bins)
+    else:
+        validate_bin_layout(project, sketch.bin_layout, user_bins)
+    return assess_plan(project, sketch, user_bins, user_tools)
+
+
+@router.get("/bins/{bin_id}/height-planning")
+@router.post("/bins/{bin_id}/height-planning")
+async def bin_height_planning(bin_id: str, req: BinUpdateRequest = BinUpdateRequest(), safety_clearance_mm: float = 0, user_id: str = Depends(get_user_id)):
+    if not math.isfinite(safety_clearance_mm) or safety_clearance_mm < 0:
+        raise HTTPException(status_code=400, detail="safety clearance must be finite and non-negative")
+    _, user_tools, user_bins = get_stores(user_id)
+    bin_data = user_bins.get(bin_id)
+    if not bin_data:
+        raise HTTPException(status_code=404, detail="bin not found")
+    bin_data = bin_data.model_copy(deep=True)
+    if req.bin_config is not None:
+        bin_data.bin_config = req.bin_config
+    if req.placed_tools is not None:
+        bin_data.placed_tools = req.placed_tools
+    sync_placed_tools(bin_data, user_tools)
+    return height_proposals(bin_data, user_tools.all(), safety_clearance_mm)
 
 
 @router.delete("/bin-projects/{project_id}/sketches/{sketch_id}", response_model=StatusResponse)
@@ -2105,7 +2239,7 @@ async def get_bin(request: Request, bin_id: str, user_id: str = Depends(get_user
     if sync_placed_tools(bin_data, user_tools):
         user_bins.set(bin_id, bin_data)
 
-    return bin_data
+    return {**bin_data.model_dump(), "height_assessment": assess_bin(bin_data, user_tools.all())}
 
 
 @router.post("/bins", response_model=BinModel)
@@ -2187,6 +2321,8 @@ def generate_bin_stl(request: Request, bin_id: str, user_id: str = Depends(get_u
     bin_data = user_bins.get(bin_id)
     if not bin_data:
         raise HTTPException(status_code=404, detail="bin not found")
+    bin_data = bin_data.model_copy(deep=True)
+    sync_placed_tools(bin_data, user_tools)
     if not bin_data.placed_tools:
         raise HTTPException(status_code=400, detail="bin has no tools placed")
 
@@ -2208,23 +2344,7 @@ def generate_bin_stl(request: Request, bin_id: str, user_id: str = Depends(get_u
     }
     input_hash = hashlib.md5(json.dumps(input_data, sort_keys=True, default=str).encode()).hexdigest()
 
-    scaled = []
-    for pt in bin_data.placed_tools:
-        points_mm = [(p.x, p.y) for p in pt.points]
-        fholes = [ScaledFingerHole.from_finger_hole(fh) for fh in pt.finger_holes]
-        interior_rings_mm = [
-            [(p.x, p.y) for p in ring]
-            for ring in pt.interior_rings
-        ]
-        sp = ScaledPolygon(pt.id, points_mm, pt.name, fholes, interior_rings_mm, depth_override=pt.depth_override)
-        source_tool = user_tools.get(pt.tool_id)
-        sp = polygon_scaler.prepare_for_generation(
-            sp,
-            bc.cutout_clearance,
-            smoothed=bool(source_tool and source_tool.smoothed),
-            smooth_level=source_tool.smooth_level if source_tool else 0.5,
-        )
-        scaled.append(sp)
+    scaled = generation_polygons(bin_data, user_tools.all())
 
     gen_req = GenerateRequest(
         grid_x=bc.grid_x,

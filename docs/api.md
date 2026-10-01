@@ -71,7 +71,7 @@ Trace and mask-trace responses include the final visible `Polygon.label` values 
 ## Tools (library)
 - `GET /api/tools` - list tools
 - `GET /api/tools/{id}` - get tool
-- `PUT /api/tools/{id}` - update tool (name, points, finger_holes)
+- `PUT /api/tools/{id}` - update tool (name, points, finger_holes, nullable `thickness_mm`)
 - `POST /api/tools/{id}/auto-rotate` - compute optimal rotation angle (degrees) to minimise bounding box
 - `DELETE /api/tools/{id}` - delete tool
 
@@ -82,6 +82,22 @@ Trace and mask-trace responses include the final visible `Polygon.label` values 
 - `PUT /api/bins/{id}` - update bin
 - `DELETE /api/bins/{id}` - delete bin + output files
 - `POST /api/bins/{id}/generate` - generate STL/3MF from bin
+
+- `GET /api/bins/{id}/height-planning?safety_clearance_mm=0` - current loaded-bin assessment and inspectable deeper-pocket / raised-rim alternatives
+- `POST /api/bins/{id}/height-planning?safety_clearance_mm=0` - assess an unsaved `BinUpdateRequest` draft without persisting it
+
+`thickness_mm` is the maximum measured resting thickness in the scanned orientation.
+It is finite and strictly positive, or `null` for unknown. A tool update that omits
+the field preserves it; explicit `null` clears it. Tool detail and summary responses
+include it. Old tools and newly saved traces default to unknown, never zero.
+
+Bin detail includes a derived `height_assessment`. Height planning returns
+`{assessment, alternatives}`. Each alternative identifies its strategy, whether
+measurements are complete, proposed `bin_config` and `placed_tools`, any explicit
+cutout override changes, external height and clearance, or an explanation when no
+supported configuration fits. These endpoints never change saved geometry.
+Apply a chosen alternative with the existing `PUT /api/bins/{id}` and then
+`POST /api/bins/{id}/generate`. Body and rim limits remain 20 units each.
 
 Both generation endpoints may return `503 Service Unavailable` with
 `Retry-After: 5` when `STL_GENERATION_CONCURRENCY` is configured and every
@@ -104,6 +120,54 @@ bypass this queue.
 - `POST /api/bin-projects/{id}/sketches` - add a drawer plan (optional `name`, `target_grid_x`, `target_grid_y`)
 - `PATCH /api/bin-projects/{id}/sketches/{sketch_id}` - update a plan's name, drawer grid or `bin_layout`
 - `DELETE /api/bin-projects/{id}/sketches/{sketch_id}` - delete a plan; bins and tools are untouched
+- `POST /api/bin-projects/{id}/sketches/{sketch_id}/assessment` - derived physical fit and capacity; optionally assess a `ProjectSketchUpdateRequest` draft without saving
+- `POST /api/bin-projects/{id}/sketches/{sketch_id}/placements/{placement_id}/stack-action` - explicitly stack, reorder or remove members
+
+Drawer-plan create/update/detail contracts extend the existing grid with nullable
+`container_width_mm`, `container_depth_mm`, `container_height_mm` and finite
+non-negative `safety_clearance_mm` (default zero). Dimensions are finite and positive;
+width and depth retain the planner's 40-unit / 1680 mm maximum. Height is canonical
+millimetres: 10 height units entered in the UI means 70 mm. Its datum is the
+supporting surface beneath the lowest bin bases; subtract installed baseplate or
+liner elevation from measured floor-to-closed-lid height. Millimetre dimensions
+override grid controls per axis. Clearing them preserves placements and restores
+the saved grid-only limits. Residual edge strips are not rounded up into grid cells.
+
+Placements add nullable `support_id`, referencing another placement in the **same
+plan**, not a bin ID. Copies retain independent identity. A placement supports at
+most one direct child; missing references and cycles are rejected before persistence.
+Root-only move/rotation updates carry unchanged descendants coherently.
+`stack-action` accepts `{action, support_id?, bin_layout?, remove_bin_copies?}`.
+Actions are `stack_on`, `move_up`, `move_down`, `remove_substack` and
+`remove_reconnect`; reconnect/reorder/attach recheck affected mating interfaces.
+An optional layout supplies the current draft. `remove_bin_copies` applies removal
+to all copies of the selected bin, atomically. Detaching/deleting a bin removes
+its referenced placements and upper sub-stacks; library bins above it are retained.
+
+Assessments return `status` (`verified`, `uncertain`, `invalid`), independent known
+`violations` and `unresolved` inputs, missing thickness IDs, `unhoused_tool_ids`,
+current bin summaries and per-placement elevations, support compatibility,
+limiting tools, conservative outline envelopes, clearance and ceiling headroom.
+Each envelope includes `seating_verified` and `insert_height_mm` (zero when disabled).
+If an outline cannot seat in the actual clipped pocket, `effective_depth_mm`,
+`resting_z_mm`, `top_mm` and `clearance_mm` are null and a known `tool_seating`
+violation identifies the affected tool. No floor-level envelope is rendered.
+For seated outlines the insert's top resting surface remains known even if tool
+thickness is missing, so insert-to-upper-bin and insert-to-ceiling interference
+stay known violations in partial plans. Generated lip/collar integrity and raised
+embossed material are checked before an interface is claimed compatible.
+The safety gap applies to tool-to-upper-bin and content-to-ceiling checks.
+Known collisions remain invalid even when another measurement is unknown.
+A verified assessment requires relevant limits, all housed project tools'
+measurements and every required support check.
+
+Capacity includes floor-root footprint union, free half-grid cells, connected free
+regions, usable grid dimensions, residual edge strips and each stack's headroom.
+Tools in bins merely linked to the project do not complete this plan.
+`geometry_revision` is a transient preview invalidation key, not a stored fit cache.
+Only user inputs and relationships persist; assessments use current tools/bins.
+Old floor-only records still load unchanged and missing physical data remains explicit.
+
 
 A project holds any number of drawer plans in `sketches`, each `{id, name, target_grid_x, target_grid_y, bin_layout, created_at, updated_at}` with its own grid of 1-40 units. Records written before multiple plans existed are migrated on load: their project-level grid and layout become a single sketch. `bin_layout` is a list of `{id, bin_id, x, y, rotation, color}` placements on the project drawer grid. `x`/`y` are gridfinity units from the top-left in 0.5 steps, `rotation` is 0, 90, 180 or 270, and `color` is an optional `#rrggbb` highlight. Every placement must reference a bin linked to the project; the same bin may be placed several times, so placement ids must be unique (the server generates one when omitted). Placements are dropped automatically when a bin is detached or deleted. `GET /api/bins` reports `grid_x`, `grid_y`, `height_units`, `half_grid_base` and `preview_tools` so a drawer plan can draw bin footprints, their contents and the snap step each bin allows.
 

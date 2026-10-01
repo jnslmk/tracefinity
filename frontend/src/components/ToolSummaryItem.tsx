@@ -42,6 +42,7 @@ export function ToolSummaryItem({ tool, size = 'md', showPoints = true, classNam
         {showPoints && size !== 'xs' && (
           <span className="block text-[10px] text-text-muted">{tool.point_count} points</span>
         )}
+        <span className="block text-[10px] text-text-secondary">{tool.thickness_mm == null ? 'Thickness unknown — needs measurement' : `Resting thickness ${tool.thickness_mm} mm`}</span>
         {children}
       </span>
     </span>

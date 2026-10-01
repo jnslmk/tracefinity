@@ -550,6 +550,97 @@ def _resolve_pocket_depth(override: float | None, config, max_depth: float) -> f
     return min(max_depth, max(5, base))
 
 
+def bin_vertical_geometry(config, depth_override: float | None = None) -> dict:
+    """Physical datums shared by planning and the pocket cutter pipeline (mm)."""
+    wall_top = config.height_units * GF_HEIGHT_UNIT
+    depth = _resolve_pocket_depth(depth_override, config, wall_top - GF_BASE_HEIGHT - 2)
+    insert = config.insert_height if config.insert_enabled else 0
+    return {
+        "wall_top_mm": wall_top,
+        "effective_depth_mm": depth,
+        "resting_z_mm": wall_top - depth + insert,
+        "external_height_mm": _bin_top_z(config, wall_top),
+    }
+
+
+def assess_printed_bin(
+    polygons: list[ScaledPolygon], raw_polygons: list[ScaledPolygon], config: GenerateRequest,
+    upper_config: GenerateRequest | None = None, relative_rotation: int = 0,
+) -> dict:
+    """Assess contact and seating against the same solids exported for printing."""
+    import manifold3d as mf
+
+    geometry = bin_vertical_geometry(config)
+    wall_top = geometry["wall_top_mm"]
+    lip_base = wall_top + (config.rim_units * GF_HEIGHT_UNIT if config.stacking_lip else 0)
+    geometry["stack_increment_mm"] = lip_base
+    body, text = ManifoldSTLGenerator().generate_bin(polygons, config, None)
+    if text:
+        body = body + text
+    geometry["external_height_mm"] = max(geometry["external_height_mm"], body.bounding_box()[5])
+    geometry["support_error"] = None
+    geometry["seating_errors"] = {}
+    ox, oy = -config.grid_x * GF_GRID / 2, -config.grid_y * GF_GRID / 2
+    max_depth = wall_top - GF_BASE_HEIGHT - 2
+    interior = mf.CrossSection([list(_interior_clip_rect(config).exterior.coords)[:-1]], mf.FillRule.EvenOdd)
+    for prepared, raw in zip(polygons, raw_polygons):
+        if len(raw.points_mm) < 3:
+            geometry["seating_errors"][raw.id] = "No usable tool outline establishes a resting surface"
+            continue
+        rings = [[(x+ox, -(y+oy)) for x, y in raw.points_mm]]
+        rings.extend([[(x+ox, -(y+oy)) for x, y in ring] for ring in raw.interior_rings_mm if len(ring) >= 3])
+        footprint = mf.CrossSection(rings, mf.FillRule.EvenOdd)
+        floor = wall_top - _resolve_pocket_depth(prepared.depth_override, config, max_depth)
+        if (footprint - interior).area() > 1e-6:
+            geometry["seating_errors"][raw.id] = "Tool outline cannot seat inside its generated, clipped pocket"
+        elif (footprint ^ body.slice(floor + .0001)).area() > 1e-6:
+            geometry["seating_errors"][raw.id] = "Printed material prevents seating on the intended pocket floor"
+        elif (footprint ^ body.slice(floor - .0001)).area() <= 1e-6:
+            geometry["seating_errors"][raw.id] = "No printed support remains at the intended pocket floor"
+
+    if not config.stacking_lip:
+        return geometry
+    interface = _add_lip_features(
+        mf.Manifold(), config, config.grid_x * GF_GRID - .5, config.grid_y * GF_GRID - .5, wall_top,
+    )
+    # Pocket cutters extend 0.01 mm above the floor. The mating band excludes
+    # that cutter epsilon but includes the raised collar below the lip.
+    interface = interface.trim_by_plane(
+        (0, 0, 1), lip_base - (BASE_H_TOP + BASE_H_BOT - LIP_D4) if config.rim_units else wall_top + .02,
+    )
+    if (interface - body).volume() > 1e-6:
+        geometry["support_error"] = "Cutters remove material from the generated mating lip/collar"
+
+    upper = (upper_config or config).model_copy(update={"height_units": 1})
+    base = _build_shell(upper)
+    if upper.magnets and not upper.half_grid_base:
+        base = base - _make_magnet_holes(upper)
+    base = base.rotate((0, 0, -relative_rotation))
+    # A real, uncut horizontal floor proves exact wall-top contact, provided
+    # labels or other raised solids do not intersect the upper base there.
+    if not config.rim_units and (body ^ base.translate((0, 0, wall_top))).volume() <= 1e-7 and (
+        body.slice(wall_top - .0001) ^ base.slice(0)
+    ).area() > 1e-6:
+        geometry["stack_increment_mm"] = wall_top
+        return geometry
+    low = lip_base - GF_BASE_HEIGHT
+    high = max(lip_base, body.bounding_box()[5]) + GF_BASE_HEIGHT
+    if (body ^ base.translate((0, 0, low))).volume() <= 1e-7:
+        geometry["support_error"] = geometry["support_error"] or "Generated base-to-lip contact cannot be established"
+        geometry["stack_increment_mm"] = lip_base
+        return geometry
+    for _ in range(30):
+        middle = (low + high) / 2
+        if (body ^ base.translate((0, 0, middle))).volume() > 1e-7:
+            low = middle
+        else:
+            high = middle
+    geometry["stack_increment_mm"] = high
+    if high > lip_base + 1e-6:
+        geometry["support_error"] = geometry["support_error"] or "Raised printed material prevents intact base-to-lip mating"
+    return geometry
+
+
 def _filleted_rect_radius(width: float, pocket_depth: float) -> float:
     """Bottom fillet radius for the filleted-rectangle cutter profile."""
     return max(0.0, min(width / 3.0, pocket_depth / 2.0))
@@ -1333,7 +1424,7 @@ class ManifoldSTLGenerator:
         self,
         polygons: list[ScaledPolygon],
         config: GenerateRequest,
-        output_path: str,
+        output_path: str | None,
         threemf_path: str | None = None,
     ):
         """Generate bin STL using manifold3d. Returns (bin_manifold, text_manifold)."""
@@ -1450,14 +1541,10 @@ class ManifoldSTLGenerator:
 
         logger.info("total generate_bin: %.2fs", time.monotonic() - t0)
 
-        # export STL
-        t1 = time.monotonic()
-        if text_body:
-            combined = bin_body + text_body
-            _export_stl(combined, output_path)
-        else:
-            _export_stl(bin_body, output_path)
-        logger.info("export_stl: %.2fs", time.monotonic() - t1)
+        if output_path is not None:
+            t1 = time.monotonic()
+            _export_stl(bin_body + text_body if text_body else bin_body, output_path)
+            logger.info("export_stl: %.2fs", time.monotonic() - t1)
 
         # 3MF export (multi-colour)
         if text_body and threemf_path:
