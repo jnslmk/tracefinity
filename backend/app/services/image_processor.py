@@ -191,7 +191,16 @@ class ImageProcessor:
         self, img: np.ndarray, gray: np.ndarray,
         min_area: float, max_area: float, margin: int, h: int, w: int
     ) -> list[tuple[float, float]] | None:
-        """detect paper by finding bright white region"""
+        """find bright, low-saturation paper without narrow metal protrusions."""
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        gray = gray.copy()
+        gray[hsv[:, :, 1] > 45] = 0
+        # Remove thin highlights before closing gaps; otherwise a caliper crossing
+        # the sheet extends its bounding rectangle all the way to the tool's tip.
+        opening_k = max(3, int(min(h, w) * 0.03) | 1)
+        gray = cv2.morphologyEx(
+            gray, cv2.MORPH_OPEN, np.ones((opening_k, opening_k), np.uint8)
+        )
         # try all thresholds and pick the largest valid candidate
         best_result = None
         best_area = 0

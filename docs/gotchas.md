@@ -61,7 +61,7 @@ Detection is two-tier: CPU flag check (`/proc/cpuinfo` on Linux, `sysctl` on mac
 
 Uses a two-stage approach: U2-Net Portable generates a rough tool mask (~0.17s), tool pixels are blacked out, then OpenCV brightness thresholding finds the paper rectangle in the cleaned image. This prevents tools (especially dark ones on white paper) from fragmenting the paper region during detection.
 
-The brightness detection tries multiple thresholds (200, 190, 180), picks the largest valid candidate, and validates against aspect ratio (0.55-0.85, covering A-series, Letter, and Tabloid) and fill ratio (>35% of the bounding rectangle is bright). A convex hull merge step handles cases where the paper is split into fragments.
+The brightness detection first excludes saturated pixels (HSV saturation >45), then opens the remaining grayscale image with a kernel 3% of the short image dimension. This keeps bright wood out and disconnects thin silver tools crossing a sheet edge before gap-closing can incorporate them into the paper rectangle. It tries multiple brightness thresholds (200, 190, 180), picks the largest valid candidate, and validates against aspect ratio (0.55-0.85, covering A-series, Letter, and Tabloid) and fill ratio (>35% of the bounding rectangle is bright). A convex hull merge step handles cases where the paper is split into fragments. If no candidate survives, the existing edge-based strategies still run on the original image.
 
 Difficult cases: hands in the frame, sticks/rods crossing the paper, very heavy tool overflow with minimal visible paper. These may need manual corner adjustment.
 
