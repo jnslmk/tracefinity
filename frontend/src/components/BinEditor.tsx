@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { LayoutGrid } from 'lucide-react'
 import type { PlacedTool, TextLabel } from '@/types'
 import { snapToGrid as snapToGridUtil } from '@/lib/svg'
 import { GRID_UNIT, DISPLAY_SCALE, SNAP_GRID } from '@/lib/constants'
@@ -29,6 +30,20 @@ interface Props {
 }
 
 type Tool = 'select' | 'text'
+
+interface AutoLayoutPlacement {
+  tool_id: string
+  name: string
+  x: number
+  y: number
+  rotation: number
+}
+
+interface AutoLayoutResult {
+  placements: AutoLayoutPlacement[]
+  bounds: [number, number, number, number]
+  efficiency: number
+}
 
 type Selection =
   | { type: 'tool'; toolId: string }
@@ -69,6 +84,8 @@ export function BinEditor({
   const [dragging, setDragging] = useState<DragState>(null)
   const [snapEnabled, setSnapEnabled] = useState(false)
   const [snapGrid, setSnapGrid] = useState(SNAP_GRID)
+  const [arranging, setArranging] = useState(false)
+  const [arrangeError, setArrangeError] = useState<string | null>(null)
   const [pendingLabel, setPendingLabel] = useState<{ x: number; y: number } | null>(null)
   const [pendingText, setPendingText] = useState('')
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null)
@@ -131,6 +148,76 @@ export function BinEditor({
     }))
     onPlacedToolsChange(updated)
   }, [getAllBounds, binWidthMm, binHeightMm, placedTools, onPlacedToolsChange])
+
+  const handleAutoArrange = useCallback(async () => {
+    if (placedTools.length === 0 || arranging) return
+    setArranging(true)
+    setArrangeError(null)
+    try {
+      const res = await fetch('/api/bins/auto-layout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          tool_ids: placedTools.map(t => t.tool_id),
+          clearance: 1.0,
+        }),
+      })
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null)
+        throw new Error(detail?.detail || 'Auto-arrange failed')
+      }
+      const data: AutoLayoutResult = await res.json()
+      const placements = new Map(data.placements.map(p => [p.tool_id, p]))
+
+      const updated = placedTools.map(tool => {
+        const placement = placements.get(tool.tool_id)
+        if (!placement || tool.points.length === 0) return tool
+
+        // rotate about the tool centre to the placement's absolute rotation
+        const delta = (placement.rotation - (tool.rotation || 0)) * (Math.PI / 180)
+        const cos = Math.cos(delta)
+        const sin = Math.sin(delta)
+        const cx = tool.points.reduce((sum, p) => sum + p.x, 0) / tool.points.length
+        const cy = tool.points.reduce((sum, p) => sum + p.y, 0) / tool.points.length
+        const rotate = (p: { x: number; y: number }) => {
+          const dx = p.x - cx
+          const dy = p.y - cy
+          return { x: cx + dx * cos - dy * sin, y: cy + dx * sin + dy * cos }
+        }
+        const points = tool.points.map(rotate)
+
+        // the API position is the rotated polygon's minimum corner
+        let minX = Infinity
+        let minY = Infinity
+        for (const p of points) {
+          minX = Math.min(minX, p.x)
+          minY = Math.min(minY, p.y)
+        }
+        const shiftX = placement.x - minX
+        const shiftY = placement.y - minY
+
+        return {
+          ...tool,
+          rotation: placement.rotation,
+          points: points.map(p => ({ x: p.x + shiftX, y: p.y + shiftY })),
+          finger_holes: tool.finger_holes.map(fh => {
+            const p = rotate(fh)
+            return { ...fh, x: p.x + shiftX, y: p.y + shiftY }
+          }),
+          interior_rings: (tool.interior_rings ?? []).map(ring => {
+            const rotated = ring.map(rotate)
+            return rotated.map(p => ({ x: p.x + shiftX, y: p.y + shiftY }))
+          }),
+        }
+      })
+      onPlacedToolsChange(updated)
+    } catch (err) {
+      setArrangeError(err instanceof Error ? err.message : 'Auto-arrange failed')
+    } finally {
+      setArranging(false)
+    }
+  }, [placedTools, onPlacedToolsChange, arranging])
 
   const screenToMm = useCallback((clientX: number, clientY: number) => {
     if (!svgRef.current) return { x: 0, y: 0 }
@@ -538,7 +625,29 @@ export function BinEditor({
           onSetCutoutDepthOverride={setCutoutDepthOverride}
           onSetHoleDepthOverride={setHoleDepthOverride}
         />
+        {placedTools.length > 0 && (
+          <>
+            <div className="w-px h-4 bg-glass-border mx-1 flex-shrink-0" />
+            <button
+              onClick={handleAutoArrange}
+              disabled={arranging}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[7px] text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap text-text-muted hover:text-text-secondary hover:bg-[rgba(255,255,255,0.03)] disabled:opacity-50 disabled:cursor-default disabled:hover:bg-transparent"
+              title="Pack the placed tools into an efficient layout"
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+              {arranging ? 'Arranging…' : 'Auto-arrange'}
+            </button>
+          </>
+        )}
       </div>
+      {arrangeError && (
+        <div
+          role="alert"
+          className="absolute top-16 left-1/2 -translate-x-1/2 z-20 glass-toolbar px-3 py-1.5 text-[11px] text-red-400"
+        >
+          {arrangeError}
+        </div>
+      )}
       <BinEditorCanvas
         svgRef={svgRef}
         displayWidth={displayWidth}

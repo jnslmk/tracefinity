@@ -24,6 +24,7 @@ from app.auth import get_user_id, require_instance_admin
 from app.config import ensure_user_dirs, settings
 from app.constants import GF_GRID, MAX_BIN_GRID_CELLS, MAX_BIN_GRID_UNITS
 from app.models.schemas import (
+    BaseModel,
     DEFAULT_SKETCH_NAME,
     BinConfig,
     BinDefaults,
@@ -2260,6 +2261,62 @@ async def create_bin(request: Request, req: CreateBinRequest, user_id: str = Dep
     user_bins.set(bin_id, bin_data)
     add_bin_to_project(project_store, req.project_id, bin_id)
     return bin_data
+
+
+class AutoLayoutRequest(BaseModel):
+    tool_ids: list[str] = []
+    clearance: float = 1.0
+
+
+class AutoLayoutResponse(BaseModel):
+    placements: list[dict]
+    bounds: tuple[float, float, float, float]
+    efficiency: float
+
+
+@router.post("/bins/auto-layout", response_model=AutoLayoutResponse)
+async def auto_layout_bin(req: AutoLayoutRequest, user_id: str = Depends(get_user_id)):
+    """Compute an auto-layout for the given tools without creating a bin."""
+    from app.services.auto_layout import auto_layout, layout_bounds, layout_efficiency
+    from shapely.geometry import Polygon as ShapelyPolygon
+
+    _, user_tools, _ = get_stores(user_id)
+
+    tools = []
+    for tid in req.tool_ids:
+        tool = user_tools.get(tid)
+        if not tool:
+            raise HTTPException(status_code=404, detail=f"tool {tid} not found")
+        points = [(p.x, p.y) for p in tool.points]
+        tools.append({
+            "id": tid,
+            "name": tool.name,
+            "polygon": ShapelyPolygon(points),
+        })
+
+    # Sort by height descending for better packing of long thin tools
+    tools.sort(key=lambda t: t["polygon"].bounds[3] - t["polygon"].bounds[1], reverse=True)
+
+    placed = auto_layout(tools, clearance=req.clearance)
+
+    if not placed:
+        raise HTTPException(status_code=400, detail="no tools to layout")
+
+    placements = []
+    for p in placed:
+        placements.append({
+            "tool_id": p.tool_id,
+            "name": p.name,
+            "x": p.x,
+            "y": p.y,
+            "rotation": p.rotation,
+        })
+
+    return AutoLayoutResponse(
+        placements=placements,
+        bounds=layout_bounds(placed),
+        efficiency=layout_efficiency(placed),
+    )
 
 
 @router.put("/bins/{bin_id}", response_model=StatusResponse)
