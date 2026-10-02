@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { planBinHeight } from '@/lib/api'
 import { Info } from 'lucide-react'
 import type { BinConfig, BinHeightPlanning, HeightProposal, PlacedTool } from '@/types'
@@ -24,6 +24,8 @@ interface Props {
   onChange: (config: BinConfig) => void
   autoSize?: boolean
   onAutoSizeChange?: (v: boolean) => void
+  fitHeight?: number | null
+  onAutoFit?: () => void
 }
 
 function HelpTip({ text }: { text: string }) {
@@ -161,7 +163,7 @@ function HintBanner({ children }: { children: React.ReactNode }) {
   )
 }
 
-export function BinConfigurator({ config, onChange, autoSize, onAutoSizeChange }: Props) {
+export function BinConfigurator({ config, onChange, autoSize, onAutoSizeChange, fitHeight, onAutoFit }: Props) {
   function update(partial: Partial<BinConfig>) {
     onChange({ ...config, ...partial })
   }
@@ -229,6 +231,20 @@ export function BinConfigurator({ config, onChange, autoSize, onAutoSizeChange }
           update({ height_units: v, cutout_depth: Math.min(Math.max(5, config.cutout_depth), newMax) })
         }}
       />
+
+      {fitHeight != null && onAutoFit && (
+        <div className="flex items-center justify-between py-1">
+          <span className="text-[10px] text-text-muted">Your tools fit at {fitHeight}u</span>
+          <button
+            type="button"
+            onClick={onAutoFit}
+            title="Set the smallest height that fits your tools and deepen the cutout so the bin stays stackable"
+            className="btn-secondary px-2 py-0.5 text-[10px]"
+          >
+            Auto-set
+          </button>
+        </div>
+      )}
 
       <SliderRow
         label="Cutout Depth"
@@ -435,17 +451,20 @@ export function BinConfigurator({ config, onChange, autoSize, onAutoSizeChange }
   )
 }
 
-export function BinHeightPlanner({ binId, config, placedTools, onApply }: {
+export function BinHeightPlanner({ binId, config, placedTools, onApply, onPlan }: {
   binId: string
   config: BinConfig
   placedTools: PlacedTool[]
   onApply: (proposal: HeightProposal) => Promise<void>
+  onPlan?: (planning: BinHeightPlanning | null) => void
 }) {
   const [gap, setGap] = useState(0)
   const [planning, setPlanning] = useState<BinHeightPlanning | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [applying, setApplying] = useState(false)
   const [revision, setRevision] = useState(0)
+  const onPlanRef = useRef(onPlan)
+  onPlanRef.current = onPlan
   useEffect(() => {
     const refresh = () => setRevision(value => value + 1)
     window.addEventListener('focus', refresh)
@@ -457,8 +476,8 @@ export function BinHeightPlanner({ binId, config, placedTools, onApply }: {
     setError(null)
     const timer = setTimeout(() => {
       planBinHeight(binId, config, placedTools, gap).then(result => {
-        if (!cancelled) setPlanning(result)
-      }).catch(err => { if (!cancelled) setError(err instanceof Error ? err.message : 'Height assessment failed') })
+        if (!cancelled) { setPlanning(result); onPlanRef.current?.(result) }
+      }).catch(err => { if (!cancelled) { setError(err instanceof Error ? err.message : 'Height assessment failed'); onPlanRef.current?.(null) } })
     }, 200)
     return () => { cancelled = true; clearTimeout(timer) }
   }, [binId, config, placedTools, gap, revision])

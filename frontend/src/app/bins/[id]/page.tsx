@@ -9,7 +9,7 @@ import { ToolBrowser } from '@/components/ToolBrowser'
 import { getBin, updateBin, generateBinStl, getBinStlUrl, getBinZipUrl, getBinThreemfUrl, getBinInsertUrl, getImageUrl, listTools, updateTool } from '@/lib/api'
 import { buildBinConfig, createPartialBinsValues, getDefaultBinConfig, resetDefaultBinConfig, saveDefaultBinConfig } from '@/lib/binDefaults'
 import { downloadExport } from '@/lib/download'
-import type { BinConfig, BinData, PlacedTool, TextLabel } from '@/types'
+import type { BinConfig, BinData, BinHeightPlanning, HeightProposal, PlacedTool, TextLabel } from '@/types'
 import { Download, Loader2, Package, ChevronDown, Check, TriangleAlert } from 'lucide-react'
 import { Breadcrumb } from '@/components/Breadcrumb'
 import { Alert } from '@/components/Alert'
@@ -64,6 +64,15 @@ export default function BinPage() {
   const doGenerateRef = useRef<() => void>(() => {})
   const [smoothedToolIds, setSmoothedToolIds] = useState<Set<string>>(new Set())
   const [smoothLevels, setSmoothLevels] = useState<Map<string, number>>(new Map())
+  const [heightPlan, setHeightPlan] = useState<BinHeightPlanning | null>(null)
+  const fitProposal = heightPlan?.alternatives.find(a => a.strategy === 'deeper_pockets' && a.bin_config) ?? null
+
+  const applyHeightProposal = useCallback(async (proposal: HeightProposal) => {
+    if (!proposal.bin_config || !proposal.placed_tools) return
+    setConfig(proposal.bin_config)
+    setPlacedTools(proposal.placed_tools)
+    lastGenerateRef.current = ''
+  }, [])
   const smoothLevelTimerRef = useRef<NodeJS.Timeout | null>(null)
 
   const [autoSize, setAutoSize] = useState(true)
@@ -456,7 +465,14 @@ export default function BinPage() {
                 Changes are not being saved. Recent edits to this bin will be lost if you leave the page.
               </div>
             )}
-            <BinConfigurator config={config} onChange={setConfig} autoSize={autoSize} onAutoSizeChange={setAutoSize} />
+            <BinConfigurator
+              config={config}
+              onChange={setConfig}
+              autoSize={autoSize}
+              onAutoSizeChange={setAutoSize}
+              fitHeight={fitProposal?.bin_config?.height_units ?? null}
+              onAutoFit={() => { if (fitProposal) void applyHeightProposal(fitProposal) }}
+            />
             <div className="mt-3 border-t border-border pt-3 space-y-1.5">
               <div className="flex gap-1.5">
                 <button
@@ -489,12 +505,7 @@ export default function BinPage() {
               <div className="flex justify-between"><span>Height</span><span>{(config.height_units * 7 + effectiveRimUnits * 7 + (config.stacking_lip ? 4.4 : 0)).toFixed(1)} mm</span></div>
             </div>
           </div>
-          <BinHeightPlanner binId={binId} config={config} placedTools={placedTools} onApply={async proposal => {
-            if (!proposal.bin_config || !proposal.placed_tools) return
-            setConfig(proposal.bin_config)
-            setPlacedTools(proposal.placed_tools)
-            lastGenerateRef.current = ''
-          }} />
+          <BinHeightPlanner binId={binId} config={config} placedTools={placedTools} onApply={applyHeightProposal} onPlan={setHeightPlan} />
         </div>
 
         {/* export buttons */}
@@ -591,6 +602,7 @@ export default function BinPage() {
                 partialBins={config.partial_bins}
                 partialBinsValues={config.partial_bins_values}
                 wallThickness={config.wall_thickness}
+                stackingLip={config.stacking_lip}
                 defaultCutoutDepth={config.cutout_depth}
                 maxCutoutDepth={calcMaxCutoutDepth(config.height_units)}
                 halfGridBase={config.half_grid_base}
