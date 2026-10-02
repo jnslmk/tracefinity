@@ -48,6 +48,16 @@ Enabled by default. The grid automatically expands or contracts to fit all place
 
 Click **Recentre** in the toolbar to move all placed tools to the centre of the bin.
 
+## Auto-arrange
+
+Click **Auto-arrange** in the toolbar to pack the placed tools into an efficient layout. A spinner and a visible canvas status remain while the request is running. Progress is indeterminate: the server does not report individual packing steps or a completion percentage.
+
+If no fitting layout is found, the editor still applies the returned arrangement and shows a warning naming the affected tools, their count, and the grid dimensions requested for that run. Increase the grid size or remove tools, then try again. This is a packing result, not proof that no possible arrangement could fit.
+
+The warning describes the **last run**, not the current grid: auto-size may expand the grid immediately after the arrangement is applied. It remains until dismissed or another auto-arrange starts; a fitting rerun leaves no warning.
+
+A failed request keeps the existing tool layout and allows another attempt. Editing tools or bin settings while packing is running invalidates the pending result, so a late response cannot overwrite those changes.
+
 ## 3D preview
 
 The right panel shows a live 3D preview that regenerates whenever the layout or configuration changes. Controls:

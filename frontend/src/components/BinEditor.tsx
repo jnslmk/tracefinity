@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { LayoutGrid } from 'lucide-react'
+import { AlertTriangle, LayoutGrid, LoaderCircle } from 'lucide-react'
 import type { PlacedTool, TextLabel } from '@/types'
 import { snapToGrid as snapToGridUtil } from '@/lib/svg'
 import { GRID_UNIT, DISPLAY_SCALE, SNAP_GRID } from '@/lib/constants'
@@ -44,6 +44,7 @@ interface AutoLayoutResult {
   placements: AutoLayoutPlacement[]
   bounds: [number, number, number, number]
   efficiency: number
+  unfitted_tool_ids: string[]
 }
 
 type Selection =
@@ -88,6 +89,17 @@ export function BinEditor({
   const [snapGrid, setSnapGrid] = useState(SNAP_GRID)
   const [arranging, setArranging] = useState(false)
   const [arrangeError, setArrangeError] = useState<string | null>(null)
+  const [arrangeWarning, setArrangeWarning] = useState<{
+    names: string[]; gridX: number; gridY: number
+  } | null>(null)
+  const arrangePendingRef = useRef(false)
+  const arrangeInputVersion = useRef(0)
+  const arrangeConfig = JSON.stringify([gridX, gridY, wallThickness, stackingLip, partialBins, partialBinsValues, halfGridBase])
+  useEffect(() => {
+    arrangeInputVersion.current += 1
+    setArrangeError(null)
+    return () => { arrangeInputVersion.current += 1 }
+  }, [placedTools, arrangeConfig])
   const [pendingLabel, setPendingLabel] = useState<{ x: number; y: number } | null>(null)
   const [pendingText, setPendingText] = useState('')
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null)
@@ -152,9 +164,12 @@ export function BinEditor({
   }, [getAllBounds, binWidthMm, binHeightMm, placedTools, onPlacedToolsChange])
 
   const handleAutoArrange = useCallback(async () => {
-    if (placedTools.length === 0 || arranging) return
+    if (placedTools.length === 0 || arrangePendingRef.current) return
+    arrangePendingRef.current = true
+    const inputVersion = arrangeInputVersion.current
     setArranging(true)
     setArrangeError(null)
+    setArrangeWarning(null)
     try {
       const res = await fetch('/api/bins/auto-layout', {
         method: 'POST',
@@ -172,6 +187,7 @@ export function BinEditor({
         throw new Error(detail?.detail || 'Auto-arrange failed')
       }
       const data: AutoLayoutResult = await res.json()
+      if (inputVersion !== arrangeInputVersion.current) return
       const placements = new Map(data.placements.map(p => [p.tool_id, p]))
 
       const updated = placedTools.map(tool => {
@@ -216,12 +232,23 @@ export function BinEditor({
         }
       })
       onPlacedToolsChange(updated)
+      if (data.unfitted_tool_ids.length > 0) {
+        const unfitted = new Set(data.unfitted_tool_ids)
+        setArrangeWarning({
+          names: placedTools.filter(tool => unfitted.has(tool.tool_id)).map(tool => tool.name),
+          gridX,
+          gridY,
+        })
+      }
     } catch (err) {
-      setArrangeError(err instanceof Error ? err.message : 'Auto-arrange failed')
+      if (inputVersion === arrangeInputVersion.current) {
+        setArrangeError(err instanceof Error ? err.message : 'Auto-arrange failed')
+      }
     } finally {
+      arrangePendingRef.current = false
       setArranging(false)
     }
-  }, [placedTools, onPlacedToolsChange, arranging, binWidthMm, binHeightMm])
+  }, [placedTools, onPlacedToolsChange, gridX, gridY, wallThickness, stackingLip])
 
   const screenToMm = useCallback((clientX: number, clientY: number) => {
     if (!svgRef.current) return { x: 0, y: 0 }
@@ -635,21 +662,43 @@ export function BinEditor({
             <button
               onClick={handleAutoArrange}
               disabled={arranging}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[7px] text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap text-text-muted hover:text-text-secondary hover:bg-[rgba(255,255,255,0.03)] disabled:opacity-50 disabled:cursor-default disabled:hover:bg-transparent"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[7px] text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap text-text-muted hover:text-text-secondary hover:bg-[rgba(255,255,255,0.03)] disabled:text-text-primary disabled:cursor-wait disabled:hover:bg-transparent"
               title="Pack the placed tools into an efficient layout"
             >
-              <LayoutGrid className="w-3.5 h-3.5" />
+              {arranging
+                ? <LoaderCircle aria-hidden="true" className="w-3.5 h-3.5 motion-safe:animate-spin" />
+                : <LayoutGrid aria-hidden="true" className="w-3.5 h-3.5" />}
               {arranging ? 'Arranging…' : 'Auto-arrange'}
             </button>
           </>
         )}
       </div>
-      {arrangeError && (
-        <div
-          role="alert"
-          className="absolute top-16 left-1/2 -translate-x-1/2 z-20 glass-toolbar px-3 py-1.5 text-[11px] text-red-400"
-        >
-          {arrangeError}
+      {(arranging || arrangeError || arrangeWarning) && (
+        <div className="absolute top-24 left-3 right-3 z-20 flex justify-center pointer-events-none">
+          {arranging ? (
+            <div role="status" className="flex items-start gap-3 rounded-xl border border-glass-border bg-surface px-4 py-3 shadow-lg max-w-md text-text-primary">
+              <LoaderCircle aria-hidden="true" className="w-5 h-5 shrink-0 text-accent motion-safe:animate-spin" />
+              <div>
+                <p className="text-sm font-medium">Arranging tools…</p>
+                <p className="text-xs text-text-secondary mt-1">Finding an efficient layout for {placedTools.length} {placedTools.length === 1 ? 'tool' : 'tools'}. This may take a moment.</p>
+              </div>
+            </div>
+          ) : arrangeError ? (
+            <div role="alert" className="rounded-xl border border-glass-border bg-surface px-4 py-3 shadow-lg max-w-md text-sm text-text-primary">
+              <p className="font-medium">Auto-arrange failed</p>
+              <p className="text-xs text-text-secondary mt-1">{arrangeError}. Your layout was kept. Try again.</p>
+            </div>
+          ) : arrangeWarning && (
+            <div role="status" className="flex items-start gap-3 rounded-xl border border-glass-border bg-surface px-4 py-3 shadow-lg max-w-md text-text-primary">
+              <AlertTriangle aria-hidden="true" className="w-5 h-5 shrink-0 text-accent" />
+              <div>
+                <p className="text-sm font-medium">Last auto-arrange: no fitting layout found for the requested {arrangeWarning.gridX} × {arrangeWarning.gridY} grid</p>
+                <p className="text-xs text-text-secondary mt-1">{arrangeWarning.names.length} {arrangeWarning.names.length === 1 ? 'tool did' : 'tools did'} not fit in that run: {arrangeWarning.names.join(', ')}.</p>
+                <p className="text-xs text-text-secondary mt-1">The arrangement was applied. Increase the grid size or remove tools, then auto-arrange again to check the current grid.</p>
+                <button type="button" onClick={() => setArrangeWarning(null)} className="pointer-events-auto mt-2 text-xs font-medium text-text-primary underline underline-offset-2 cursor-pointer">Dismiss</button>
+              </div>
+            </div>
+          )}
         </div>
       )}
       <BinEditorCanvas

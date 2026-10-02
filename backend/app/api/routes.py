@@ -2273,6 +2273,7 @@ class AutoLayoutResponse(BaseModel):
     placements: list[dict]
     bounds: tuple[float, float, float, float]
     efficiency: float
+    unfitted_tool_ids: list[str] = []
 
 
 @router.post("/bins/auto-layout", response_model=AutoLayoutResponse)
@@ -2335,10 +2336,20 @@ def auto_layout_bin(req: AutoLayoutRequest, user_id: str = Depends(get_user_id))
         })
 
     bounds = layout_bounds(placed)
+    fitted_ids = set()
+    for p in placed:
+        if p.polygon.is_empty or p.polygon.area <= 0:
+            continue
+        minx, miny, maxx, maxy = p.polygon.bounds
+        if bin_width is not None and bin_depth is not None:
+            if minx < -1e-6 or miny < -1e-6 or maxx > bin_width + 1e-6 or maxy > bin_depth + 1e-6:
+                continue
+        fitted_ids.add(p.tool_id)
     return AutoLayoutResponse(
         placements=placements,
         bounds=(bounds[0] + offset_x, bounds[1] + offset_y, bounds[2] + offset_x, bounds[3] + offset_y),
         efficiency=layout_efficiency(placed),
+        unfitted_tool_ids=[tid for tid in req.tool_ids if tid not in fitted_ids],
     )
 
 

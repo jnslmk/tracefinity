@@ -76,3 +76,67 @@ def test_empty_outline_is_skipped():
     ]
     placed = auto_layout(tools)
     assert [p.tool_id for p in placed] == ["real"]
+
+
+@pytest.mark.parametrize(
+    ("outlines", "config", "unfitted"),
+    [
+        ({"large": _box(0, 0, 60, 60)}, {"grid_x": 1, "grid_y": 1}, {"large"}),
+        (
+            {"a": _box(0, 0, 30, 30), "b": _box(0, 0, 30, 30)},
+            {"grid_x": 1, "grid_y": 1},
+            {"b"},
+        ),
+        ({"long": _box(0, 0, 45, 5)}, {"grid_x": 1, "grid_y": 1}, set()),
+        (
+            {"small": _box(0, 0, 10, 10), "empty": Polygon()},
+            {"grid_x": 1, "grid_y": 1},
+            {"empty"},
+        ),
+        (
+            {"large": _box(0, 0, 60, 60), "empty": Polygon()},
+            None,
+            {"empty"},
+        ),
+    ],
+)
+def test_endpoint_reports_final_layout_fit(tmp_path, monkeypatch, outlines, config, unfitted):
+    from fastapi.testclient import TestClient
+    from shapely.affinity import rotate, translate
+
+    import app.api.routes as routes
+    from app.config import ensure_user_dirs, settings
+    from app.main import app
+    from app.models.schemas import Tool
+
+    monkeypatch.setattr(settings, "storage_path", tmp_path)
+    monkeypatch.setattr(routes, "_store_cache", {})
+    ensure_user_dirs(tmp_path / "default")
+    _, tools, _ = routes.get_stores("default")
+    for tool_id, outline in outlines.items():
+        tools.set(tool_id, Tool(
+            id=tool_id,
+            name=tool_id,
+            points=[{"x": x, "y": y} for x, y in list(outline.exterior.coords)[:-1]],
+        ))
+
+    response = TestClient(app).post("/api/bins/auto-layout", json={
+        "tool_ids": list(outlines),
+        "clearance": 0,
+        "bin_config": config,
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert set(data["unfitted_tool_ids"]) == unfitted
+    assert {p["tool_id"] for p in data["placements"]} == set(outlines) - {"empty"}
+    if config:
+        # Default 1x1 bin: 41.5mm exterior, 2.6mm lip inset on each side.
+        for placement in data["placements"]:
+            outline = rotate(outlines[placement["tool_id"]], placement["rotation"])
+            x0, y0, _, _ = outline.bounds
+            final = translate(outline, placement["x"] - x0, placement["y"] - y0)
+            x0, y0, x1, y1 = final.bounds
+            fits = x0 >= 2.85 - 1e-6 and y0 >= 2.85 - 1e-6 and x1 <= 39.15 + 1e-6 and y1 <= 39.15 + 1e-6
+            assert fits == (placement["tool_id"] not in unfitted)
+        if "long" in outlines:
+            assert data["placements"][0]["rotation"] not in (0, 90, 180, 270)

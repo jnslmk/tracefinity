@@ -79,12 +79,25 @@ Trace and mask-trace responses include the final visible `Polygon.label` values 
 - `GET /api/bins` - list bins
 - `GET /api/bins/{id}` - get bin (syncs placed tools with library versions)
 - `POST /api/bins` - create bin (optionally with tool_ids for auto-sizing and bin_config defaults)
+- `POST /api/bins/auto-layout` - arrange requested tools without creating a bin
 - `PUT /api/bins/{id}` - update bin
 - `DELETE /api/bins/{id}` - delete bin + output files
 - `POST /api/bins/{id}/generate` - generate STL/3MF from bin
 
 - `GET /api/bins/{id}/height-planning?safety_clearance_mm=0` - current loaded-bin assessment and inspectable deeper-pocket / raised-rim alternatives
 - `POST /api/bins/{id}/height-planning?safety_clearance_mm=0` - assess an unsaved `BinUpdateRequest` draft without persisting it
+
+Auto-layout accepts `{tool_ids, clearance, bin_config?}` and returns
+`{placements, bounds, efficiency, unfitted_tool_ids}`. Placement `x`/`y` is the
+minimum corner of the final rotated outline, in millimetres. With `bin_config`,
+`unfitted_tool_ids` contains requested library tool IDs not placed or whose final
+outlines extend beyond the usable interior (wall/stacking-lip inset), with a
+1e-6 mm containment tolerance. Degenerate outlines are also reported. Without a
+target configuration, only unplaced or degenerate tools are reported.
+Overflow placements are still returned: this warning means the arranger did not
+find a fitting layout, not that fitting is mathematically impossible. Increase
+the grid size or remove tools and try again. Missing tools still return 404;
+when no tools can be placed, the endpoint still returns 400.
 
 `thickness_mm` is the maximum measured resting thickness in the scanned orientation.
 It is finite and strictly positive, or `null` for unknown. A tool update that omits
