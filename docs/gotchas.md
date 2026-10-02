@@ -51,6 +51,12 @@ mesh booleans were measured at 10-100x faster for this workload. See
 - Undo/redo uses the `useHistory` hook (deep-clone, Cmd+Z handling). The `set()` method pushes to history; `undo()`/`redo()` call the `onChange` callback.
 - ToolEditor and BinEditor are split into orchestrator + toolbar + canvas sub-components. `CutoutOverlay` renders finger holes in both.
 
+## Bin placements and auto-arrange
+
+- `PlacedTool.points` are rigid copies of the library outline: rotated by `PlacedTool.rotation` (absolute, relative to the library outline) about the outline centroid, then translated. `sync_placed_tools` rebuilds them on every read, so anything that moves a tool must update `rotation` and the points together.
+- Auto-layout placements report `x`/`y` as the **minimum corner** of the placed outline; the bin editor rotates the tool and shifts its min corner to that position. Reporting the translation offset instead shifts every tool by its own rotated bounds and the packed layout falls apart.
+- Packing runs inside the request handler: keep CPU-bound endpoints off the event loop (declare `def` so FastAPI uses its threadpool, or wrap in `asyncio.to_thread`). A blocked loop does not fail cleanly — the dev proxy dies with `socket hang up`/ECONNRESET and the feature looks broken rather than slow.
+
 ## AVX / ONNX requirement
 
 U2-Net paper detection and all local tracers (`isnet`, `birefnet-lite`, `inspyrenet`) require ONNX Runtime, which needs AVX CPU instructions. On non-AVX CPUs (some older VMs, Atoms), ONNX is disabled at startup and paper detection falls back to OpenCV-only brightness thresholding -- less accurate, may need manual corner adjustment. Local tracers won't load; use a remote tracer (`gemini`, `replicate`, `fal`).
