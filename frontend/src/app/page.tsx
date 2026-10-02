@@ -246,7 +246,7 @@ function NameModal({ open, title = 'New bin', description = 'Give your bin a nam
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onCancel} />
-      <div className="relative glass rounded-[8px] shadow-xl max-w-sm w-full mx-4 p-6">
+      <div className="relative bg-surface rounded-[8px] shadow-xl max-w-sm w-full mx-4 p-6">
         <h3 className="text-sm font-semibold text-text-primary">{title}</h3>
         <p className="mt-1.5 text-xs text-text-secondary">{description}</p>
         <input
