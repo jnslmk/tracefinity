@@ -107,27 +107,51 @@ function cleanChaikinOutput(pts: Point[]): Point[] {
   return simplifyPolygon(pts, 0.05)
 }
 
-/**
- * Smooth a ring via chaikin subdivision, render as polyline path.
- * Matches the backend STL pipeline exactly.
- */
-function smoothRingPath(pts: Point[], s: number): string {
-  if (pts.length < 3) return pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * s} ${p.y * s}`).join(' ') + ' Z'
-  const smoothed = cleanChaikinOutput(chaikinSmooth(addChaikinSupportPoints(pts)))
-  return smoothed.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * s} ${p.y * s}`).join(' ') + ' Z'
+// signed ring area; positive is counter-clockwise.
+function signedArea(ring: Point[]): number {
+  let sum = 0
+  for (let i = 0; i < ring.length; i++) {
+    const p = ring[i]
+    const q = ring[(i + 1) % ring.length]
+    sum += p.x * q.y - q.x * p.y
+  }
+  return sum / 2
 }
 
+// One closed subpath. Outer rings wind counter-clockwise and interior rings
+// clockwise so the nonzero fill rule paints their union; see smoothPathData.
+function ringPath(ring: Point[], s: number, outer: boolean, smooth = false): string {
+  if (ring.length < 3) return ''
+  const pts = smooth ? cleanChaikinOutput(chaikinSmooth(addChaikinSupportPoints(ring))) : ring
+  const ordered = (signedArea(ring) > 0) === outer ? pts : [...pts].reverse()
+  return ordered.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * s} ${p.y * s}`).join(' ') + ' Z'
+}
+
+/**
+ * Build the `d` for a smoothed outline that still covers the traced ring.
+ *
+ * The printed pocket is cut from the smoothed outline, so smoothing may only
+ * ever add material: a corner it rounds or an edge it straightens past the
+ * traced ring would leave the tool resting on a ledge. `rawPoints` is the
+ * traced ring; emitting it next to the smoothed ring and filling the path with
+ * the nonzero rule paints exactly the union of both regions — the same region
+ * the backend builds with a shapely union. Interior rings follow the same rule,
+ * so an island can shrink but never grow back into the traced tool.
+ */
 export function smoothPathData(
   points: Point[],
   holes?: Point[][],
   scale?: number,
+  rawPoints?: Point[],
 ): string {
   const s = scale ?? 1
-  let d = smoothRingPath(points, s)
+  const parts: string[] = [ringPath(points, s, true, true)]
+  if (rawPoints && rawPoints.length >= 3) parts.push(ringPath(rawPoints, s, true))
   for (const hole of holes ?? []) {
-    d += ' ' + smoothRingPath(hole, s)
+    parts.push(ringPath(hole, s, false, true))
+    parts.push(ringPath(hole, s, false))
   }
-  return d
+  return parts.filter(Boolean).join(' ')
 }
 
 // DP tolerance for smoothing, absolute mm. trace noise is a property of the

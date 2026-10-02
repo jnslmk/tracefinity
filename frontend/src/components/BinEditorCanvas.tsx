@@ -190,20 +190,18 @@ export function BinEditorCanvas({
           })()}
 
           {placedTools.map(tool => {
-            let pathData: string
-            if (smoothedToolIds?.has(tool.tool_id)) {
-              const level = smoothLevels?.get(tool.tool_id) ?? 0.5
-              pathData = smoothPathData(simplifyPolygon(tool.points, smoothEpsilon(level)), tool.interior_rings, DISPLAY_SCALE)
-            } else {
-              pathData = polygonPathData(tool.points, tool.interior_rings, DISPLAY_SCALE)
-            }
+            const isSmoothed = smoothedToolIds?.has(tool.tool_id) ?? false
+            const level = smoothLevels?.get(tool.tool_id) ?? 0.5
+            const pathData = isSmoothed
+              ? smoothPathData(simplifyPolygon(tool.points, smoothEpsilon(level)), tool.interior_rings, DISPLAY_SCALE, tool.points)
+              : polygonPathData(tool.points, tool.interior_rings, DISPLAY_SCALE)
             const isSelected = selection?.type === 'tool' && selection.toolId === tool.id
 
             return (
               <g key={tool.id} onClick={stopClickUnlessText}>
                 <path
                   d={pathData}
-                  fillRule="evenodd"
+                  fillRule={isSmoothed ? 'nonzero' : 'evenodd'}
                   fill={isSelected ? 'rgb(51, 65, 85)' : 'rgb(71, 85, 105)'}
                   stroke={isSelected ? 'rgb(148, 163, 184)' : 'rgb(100, 116, 139)'}
                   strokeWidth={handleStroke}

@@ -215,9 +215,56 @@ class PolygonScaler:
 
         return polygon
 
+    @staticmethod
+    def _as_shape(polygon: ScaledPolygon):
+        """shapely region for a cutout, repaired if the ring is self-touching."""
+        shape = ShapelyPolygon(polygon.points_mm, holes=polygon.interior_rings_mm or [])
+        return shape if shape.is_valid else make_valid(shape)
+
+    def cover_traced_outline(
+        self, traced: ScaledPolygon, smoothed: ScaledPolygon
+    ) -> ScaledPolygon:
+        """union a smoothed cut with the traced cut it came from.
+        The pocket is cut from the smoothed outline, so smoothing may only ever
+        add material: a rounded corner or a simplified edge that moves inward
+        would leave the tool resting on a ledge. Unioning both regions makes the
+        smoothed cut a superset of the traced one, so the tool seats on its own
+        envelope. Interior rings follow the same rule, so an island can shrink
+        but never grow back into the traced tool."""
+        try:
+            combined = self._as_shape(smoothed).union(self._as_shape(traced))
+        except Exception:
+            logger.exception(
+                "smoothing envelope union failed for %s; keeping smoothed outline",
+                traced.id,
+            )
+            return smoothed
+
+        result = self._largest_polygon(combined)
+        if result is None:
+            logger.warning(
+                "smoothing envelope union produced no usable outline for %s; keeping smoothed outline",
+                traced.id,
+            )
+            return smoothed
+        if combined.geom_type != "Polygon":
+            logger.warning(
+                "smoothed outline %s split while covering the traced envelope; keeping largest piece",
+                traced.id,
+            )
+
+        coords = list(result.exterior.coords)[:-1]
+        holes = [list(interior.coords)[:-1] for interior in result.interiors]
+        return ScaledPolygon(
+            smoothed.id, coords, smoothed.label, smoothed.finger_holes, holes,
+            depth_override=smoothed.depth_override,
+        )
+
     def smooth(self, polygon: ScaledPolygon, level: float = 0.5) -> ScaledPolygon:
         """simplify, bound corner influence, then subdivide and clean.
-        level 0..1 controls simplification aggressiveness before smoothing."""
+        level 0..1 controls simplification aggressiveness before smoothing.
+        The result always covers the traced outline; smoothing rounds corners
+        and straightens edges only where that adds material."""
         pts = polygon.points_mm
         if len(pts) < 4:
             return polygon
@@ -232,7 +279,8 @@ class PolygonScaler:
         # clean up dense chaikin output — remove near-collinear points that
         # cause clipper2 chord artifacts, while keeping the smooth shape
         result = ScaledPolygon(polygon.id, smoothed_pts, polygon.label, polygon.finger_holes, smoothed_rings, depth_override=polygon.depth_override)
-        return self.simplify(result, tolerance_mm=0.05)
+        result = self.simplify(result, tolerance_mm=0.05)
+        return self.cover_traced_outline(polygon, result)
 
     def prepare_for_generation(
         self,

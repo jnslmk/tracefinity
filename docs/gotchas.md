@@ -13,7 +13,9 @@ SVG/layout/bin-space is Y-down (0 = top edge). Manifold3d is Y-up. Always negate
 
 ## Cutout pipeline order
 
-Smoothing/simplification runs BEFORE clearance (`prepare_for_generation`), never after -- vertex reduction erodes the outline by up to its tolerance and must not eat the clearance. The printed pocket is the previewed shape grown by exactly the clearance. The smoothing epsilon is absolute mm (`smooth_epsilon`), duplicated in `lib/svg.ts smoothEpsilon`. After simplification, both pipelines add support points 2mm from each corner before Chaikin subdivision so corner influence cannot bow long edges. Keep the epsilon and Chaikin corner span in lockstep between backend and frontend or preview and print diverge.
+Smoothing/simplification runs BEFORE clearance (`prepare_for_generation`), never after, and it may only ever add material to the cut. `PolygonScaler.smooth` returns the union of the smoothed region with the traced region, so a rounded corner or a simplified chord can never uncover the tool -- vertex reduction used to erode a sharp tip (the wire stripper jaw by ~1.3mm), which ate the clearance and left the tool resting on printed material. The printed pocket is the previewed shape grown by exactly the clearance and always covers the traced outline. Interior rings take the same union, so an island can shrink but never grow back into the traced tool. The smoothing epsilon is absolute mm (`smooth_epsilon`), duplicated in `lib/svg.ts smoothEpsilon`. After simplification, both pipelines add support points 2mm from each corner before Chaikin subdivision so corner influence cannot bow long edges. Keep the epsilon and Chaikin corner span in lockstep between backend and frontend or preview and print diverge.
+
+The frontend preview has no polygon-boolean dependency, so `smoothPathData(points, holes, scale, rawPoints)` emits the smoothed ring next to the traced one and callers fill the path with `fillRule="nonzero"`. Outer rings wind counter-clockwise and interior rings clockwise, so what `nonzero` paints is exactly the backend's shapely union. Because convex features are traced verbatim, a smoothed preview hugs the traced envelope there; only concave material the smoothing adds shows a visible difference. Any change to this pipeline invalidates cached geometry: bump `STL_GEOMETRY_VERSION` in `stl_generator_manifold.py`.
 
 ## EXIF orientation
 
@@ -56,6 +58,7 @@ mesh booleans were measured at 10-100x faster for this workload. See
 - `PlacedTool.points` are rigid copies of the library outline: rotated by `PlacedTool.rotation` (absolute, relative to the library outline) about the outline centroid, then translated. `sync_placed_tools` rebuilds them on every read, so anything that moves a tool must update `rotation` and the points together.
 - Auto-layout placements report `x`/`y` as the **minimum corner** of the placed outline; the bin editor rotates the tool and shifts its min corner to that position. Reporting the translation offset instead shifts every tool by its own rotated bounds and the packed layout falls apart.
 - Packing runs inside the request handler: keep CPU-bound endpoints off the event loop (declare `def` so FastAPI uses its threadpool, or wrap in `asyncio.to_thread`). A blocked loop does not fail cleanly — the dev proxy dies with `socket hang up`/ECONNRESET and the feature looks broken rather than slow.
+- Threadpool execution keeps the event loop responsive but does not prevent proxy timeouts. Auto-layout must discard candidates whose best possible score cannot beat an existing placement **before** translating or clipping polygons. Seed refinement with the screened contact placement; keep outside-area scoring for overflow layouts when no inside placement exists.
 
 ## AVX / ONNX requirement
 

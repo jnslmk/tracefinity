@@ -29,6 +29,7 @@ interface Props {
 
   // polygon
   displayPoints: Point[]
+  rawPoints: Point[]
   smoothed: boolean
   interiorRings?: Point[][]
 
@@ -59,7 +60,7 @@ export function ToolEditorCanvas({
   svgRef, zvbX, zvbY, zvbW, zvbH, isCutoutMode,
   handleBackgroundClick, handleSvgMouseDown,
   gridMinX, gridMaxX, gridMinY, gridMaxY, gridStep, zoom,
-  displayPoints, smoothed, interiorRings,
+  displayPoints, rawPoints, smoothed, interiorRings,
   points, editMode, selection,
   handleEdgeClick, handleVertexMouseDown,
   displayHoles, handleHoleMouseDown, handleResizeMouseDown, handleHoleRotateMouseDown,
@@ -141,8 +142,8 @@ export function ToolEditorCanvas({
 
           {/* polygon fill */}
           <path
-            d={smoothed ? smoothPathData(displayPoints, interiorRings, DISPLAY_SCALE) : polygonPathData(displayPoints, interiorRings, DISPLAY_SCALE)}
-            fillRule="evenodd"
+            d={smoothed ? smoothPathData(displayPoints, interiorRings, DISPLAY_SCALE, rawPoints) : polygonPathData(displayPoints, interiorRings, DISPLAY_SCALE)}
+            fillRule={smoothed ? 'nonzero' : 'evenodd'}
             fill={sourceImage ? 'rgba(71, 85, 105, 0.18)' : 'rgb(71, 85, 105)'}
             stroke={sourceImage ? 'rgb(226, 232, 240)' : 'rgb(148, 163, 184)'}
             strokeWidth={(sourceImage ? 2.5 : 2) / zoom}

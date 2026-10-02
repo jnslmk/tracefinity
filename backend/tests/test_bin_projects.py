@@ -29,6 +29,7 @@ from app.services.project_service import project_health, project_status, repair_
 from app.services.project_store import ProjectStore
 from app.services.stl_generator_manifold import ManifoldSTLGenerator
 from app.services.tool_store import ToolStore
+from app.services.toolbox_planning import assess_bin
 from tests.test_max_cutout_depth import _surface_z
 
 
@@ -1002,6 +1003,30 @@ def test_finger_hole_removing_printed_lip_is_not_verified_or_attachable(tmp_path
     assert rejected.status_code == 400
     saved = client.get(f"/api/bin-projects/{project['id']}").json()["sketches"][0]["bin_layout"]
     assert saved[1]["support_id"] is None and saved[1]["x"] == 1
+
+
+def test_smoothed_tip_seats_at_default_clearance():
+    """The simplifier drops a convex feature shallower than its tolerance, so the
+    smoothed outline alone misses it. The printed pocket must still cover the
+    traced outline, or the tool rests on the material left at the tip instead of
+    on its pocket floor. Both rings are centred in a 3x3 bin."""
+    top = [(6.0 * i, 0.0) for i in range(11)]
+    top[5] = (30.0, -1.4)
+    top[7] = (42.0, 1.4)
+    points = [(x + 33.0, y + 43.7) for x, y in top + [(60.0, 40.0), (0.0, 40.0)]]
+    tool = Tool(
+        id="tip", name="Sharp tip", thickness_mm=6, smoothed=True, smooth_level=1.0,
+        points=[{"x": x, "y": y} for x, y in points],
+    )
+    placed = PlacedTool(id="tip-1", tool_id=tool.id, name=tool.name, points=tool.points)
+    bin_data = BinModel(id="bin", bin_config=BinConfig(
+        grid_x=3, grid_y=3, height_units=4, cutout_clearance=1.0, cutout_depth=12, magnets=False,
+    ), placed_tools=[placed])
+
+    assessment = assess_bin(bin_data, {tool.id: tool})
+
+    assert assessment["seating_errors"] == {}, assessment["seating_errors"]
+    assert assessment["envelopes"][0]["seating_verified"]
 
 
 @pytest.mark.parametrize("kind", ["undersized", "wall", "outside"])

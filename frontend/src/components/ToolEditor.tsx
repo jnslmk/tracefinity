@@ -822,6 +822,7 @@ export function ToolEditor({ points, fingerHoles, interiorRings, smoothed, smoot
         gridStep={gridStep}
         zoom={zoom}
         displayPoints={displayPoints}
+        rawPoints={rawDisplayPoints}
         smoothed={previewSmoothed}
         interiorRings={displayRings}
         points={points}

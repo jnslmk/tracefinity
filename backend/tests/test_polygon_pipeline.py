@@ -5,7 +5,12 @@ import pytest
 from shapely.geometry import Point as SPPoint
 from shapely.geometry import Polygon as SP
 
-from app.services.polygon_scaler import PolygonScaler, ScaledPolygon, smooth_epsilon
+from app.services.polygon_scaler import (
+    PolygonScaler,
+    ScaledFingerHole,
+    ScaledPolygon,
+    smooth_epsilon,
+)
 
 
 def _dense_square(side: float, pts_per_edge: int = 200) -> list[tuple[float, float]]:
@@ -92,8 +97,9 @@ class TestPrepareForGeneration:
 
         worst = _min_clearance(reference, cut)
         assert worst >= clearance - 0.1, f"clearance eaten: worst {worst:.3f}mm"
-        # and not over-grown either
-        assert cut.within(reference.buffer(clearance + 0.2))
+        # and not over-grown either. The union keeps the traced corners sharp,
+        # and clearance uses a mitre join, so bound it with the same join.
+        assert cut.within(reference.buffer(clearance, join_style=2).buffer(0.01))
 
     def test_unsmoothed_clearance_contains_raw(self, scaler):
         raw = _dense_square(80.0)
@@ -128,15 +134,85 @@ class TestPrepareForGeneration:
         assert island.area < SP(ring).area
 
     def test_erosion_bounded_for_large_tools(self, scaler):
-        """DP epsilon must not scale with tool size: a 300mm-diagonal circle
-        smoothed at the default level erodes by chord sagitta + chaikin,
-        which must stay within ~2x the absolute epsilon."""
+        """absolute epsilon keeps a 300mm-diagonal circle's chord sagitta small,
+        and the smoothed outline must still cover it at every level."""
         r = 106.0  # ~300mm diagonal bbox
         raw = [
             (r * np.cos(a) + r, r * np.sin(a) + r)
             for a in np.linspace(0, 2 * np.pi, 720, endpoint=False)
         ]
-        smoothed = SP(scaler.smooth(_sp(raw), level=0.5).points_mm)
-        worst = _min_clearance(SP(raw), smoothed)
-        # old diag-scaled epsilon (1.5mm) gave ~-2.9mm here; absolute 0.9mm caps it
-        assert worst >= -2.0, f"smoothing erosion too deep: {worst:.3f}mm"
+        traced = SP(raw)
+        for level in (0.5, 1.0):
+            smoothed = SP(scaler.smooth(_sp(raw), level=level).points_mm)
+            assert traced.difference(smoothed).area == pytest.approx(0.0, abs=1e-6)
+
+
+def _traced_with_tip() -> list[tuple[float, float]]:
+    """A densely sampled edge carrying a bump and a notch smaller than the
+    smoothing tolerance. The simplifier drops both, so the smoothed outline
+    alone under-covers the bump and over-covers the notch."""
+    top = [(6.0 * i, 0.0) for i in range(11)]
+    top[5] = (30.0, -1.4)
+    top[7] = (42.0, 1.4)
+    return top + [(60.0, 40.0), (0.0, 40.0)]
+
+
+class TestNonErodingSmooth:
+    """Smoothing may round and straighten, but it must never uncover the traced
+    outline: the pocket is cut from the smoothed shape, so an eroded patch leaves
+    the tool resting on a ledge instead of on its pocket floor."""
+
+    LEVELS = (0.0, 0.5, 1.0)
+
+    @pytest.mark.parametrize("level", LEVELS)
+    def test_smoothed_region_still_covers_traced_outline(self, scaler, level):
+        traced = SP(_traced_with_tip())
+        smoothed = SP(scaler.smooth(_sp(_traced_with_tip()), level=level).points_mm)
+        assert traced.difference(smoothed).area == pytest.approx(0.0, abs=1e-6)
+
+    @pytest.mark.parametrize("level", LEVELS)
+    def test_island_never_grows_back_into_traced_outline(self, scaler, level):
+        ring = [(20.0, 20.0), (40.0, 20.0), (40.0, 30.0), (20.0, 30.0)]
+        poly = ScaledPolygon("t", _traced_with_tip(), "t", interior_rings_mm=[ring])
+        smoothed = scaler.smooth(poly, level=level)
+        traced = SP(_traced_with_tip(), holes=[ring])
+        cut = SP(smoothed.points_mm, holes=smoothed.interior_rings_mm)
+        assert traced.difference(cut).area == pytest.approx(0.0, abs=1e-6)
+
+    def test_smoothing_still_fills_the_notch_it_bridges(self, scaler):
+        """The result is not the traced outline verbatim: material the
+        smoothing added is kept."""
+        traced = SP(_traced_with_tip())
+        smoothed = SP(scaler.smooth(_sp(_traced_with_tip()), level=1.0).points_mm)
+        assert smoothed.area > traced.area
+        assert smoothed.covers(SPPoint(42.0, 1.2))
+
+    def test_bump_the_simplifier_dropped_is_covered(self, scaler):
+        raw = _traced_with_tip()
+        simplified = SP(
+            scaler.simplify(_sp(raw), tolerance_mm=smooth_epsilon(1.0)).points_mm
+        )
+        assert not simplified.contains(SPPoint(30.0, -1.2))
+        smoothed = SP(scaler.smooth(_sp(raw), level=1.0).points_mm)
+        assert smoothed.covers(SPPoint(30.0, -1.2))
+
+    def test_default_clearance_pocket_covers_traced_outline(self, scaler):
+        traced = SP(_traced_with_tip())
+        prepared = scaler.prepare_for_generation(
+            _sp(_traced_with_tip()), 1.0, smoothed=True, smooth_level=0.5
+        )
+        assert traced.difference(SP(prepared.points_mm)).area == pytest.approx(
+            0.0, abs=1e-6
+        )
+
+    def test_metadata_survives_the_envelope_union(self, scaler):
+        poly = ScaledPolygon("tool-1", _traced_with_tip(), "Cutter")
+        poly.finger_holes = [ScaledFingerHole("h1", 5.0, 5.0, 2.0)]
+        poly.depth_override = 7.5
+
+        result = scaler.smooth(poly, level=0.5)
+
+        assert (result.id, result.label, result.depth_override) == (
+            "tool-1", "Cutter", 7.5,
+        )
+        assert result.finger_holes is poly.finger_holes
