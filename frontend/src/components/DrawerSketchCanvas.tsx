@@ -232,12 +232,19 @@ export function DrawerSketchCanvas({
           rx={2}
         />
 
+        {assessment?.free_cells.map(cell => <rect key={`${cell.x}/${cell.y}`} x={cell.x * GRID_UNIT} y={cell.y * GRID_UNIT}
+          width={cell.w * GRID_UNIT} height={cell.h * GRID_UNIT} fill="var(--color-accent)" fillOpacity=".06" stroke="var(--color-border-subtle)" strokeWidth=".3" className="pointer-events-none" />)}
+        {assessment?.grid_x != null && assessment.residual_width_mm != null && assessment.residual_width_mm > 0 && <rect x={assessment.grid_x * GRID_UNIT} y="0"
+          width={assessment.residual_width_mm} height={drawerHeightMm} fill="var(--color-text-muted)" fillOpacity=".25"><title>Residual edge strip, not a usable grid cell</title></rect>}
+        {assessment?.grid_y != null && assessment.residual_depth_mm != null && assessment.residual_depth_mm > 0 && <rect x="0" y={assessment.grid_y * GRID_UNIT}
+          width={drawerWidthMm} height={assessment.residual_depth_mm} fill="var(--color-text-muted)" fillOpacity=".25"><title>Residual edge strip, not a usable grid cell</title></rect>}
         {gridLines(drawerX).map(unit => (
           <line
             key={`v${unit}`}
             x1={unit * GRID_UNIT} y1={0}
             x2={unit * GRID_UNIT} y2={drawerHeightMm}
-            stroke="var(--color-bin-preview-grid)" strokeWidth={0.6}
+            stroke="var(--color-bin-preview-grid)" strokeWidth={Number.isInteger(unit) ? 0.6 : 1.2}
+            strokeDasharray={Number.isInteger(unit) ? undefined : '6,3'}
           />
         ))}
         {gridLines(drawerY).map(unit => (
@@ -245,15 +252,10 @@ export function DrawerSketchCanvas({
             key={`h${unit}`}
             x1={0} y1={unit * GRID_UNIT}
             x2={drawerWidthMm} y2={unit * GRID_UNIT}
-            stroke="var(--color-bin-preview-grid)" strokeWidth={0.6}
+            stroke="var(--color-bin-preview-grid)" strokeWidth={Number.isInteger(unit) ? 0.6 : 1.2}
+            strokeDasharray={Number.isInteger(unit) ? undefined : '6,3'}
           />
         ))}
-        {assessment?.free_cells.map(cell => <rect key={`${cell.x}/${cell.y}`} x={cell.x * GRID_UNIT} y={cell.y * GRID_UNIT}
-          width={cell.w * GRID_UNIT} height={cell.h * GRID_UNIT} fill="var(--color-accent)" fillOpacity=".06" stroke="var(--color-border-subtle)" strokeWidth=".3" className="pointer-events-none" />)}
-        {assessment?.grid_x != null && assessment.residual_width_mm != null && assessment.residual_width_mm > 0 && <rect x={assessment.grid_x * GRID_UNIT} y="0"
-          width={assessment.residual_width_mm} height={drawerHeightMm} fill="var(--color-text-muted)" fillOpacity=".25"><title>Residual edge strip, not a usable grid cell</title></rect>}
-        {assessment?.grid_y != null && assessment.residual_depth_mm != null && assessment.residual_depth_mm > 0 && <rect x="0" y={assessment.grid_y * GRID_UNIT}
-          width={drawerWidthMm} height={assessment.residual_depth_mm} fill="var(--color-text-muted)" fillOpacity=".25"><title>Residual edge strip, not a usable grid cell</title></rect>}
 
         {placements.map(placement => {
           const bin = bins.get(placement.bin_id)

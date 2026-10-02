@@ -154,8 +154,12 @@ export function rotationOffsetMm(
 /** Unit positions for drawer grid lines, including the trailing partial unit. */
 export function gridLines(units: number): number[] {
   const lines: number[] = []
-  for (let i = 0; i <= Math.floor(units); i++) lines.push(i)
-  if (!Number.isInteger(units)) lines.push(units)
+  const step = 0.5
+  for (let i = 0; i <= Math.floor(units / step); i++) {
+    const pos = i * step
+    if (pos <= units) lines.push(pos)
+  }
+  if (!Number.isInteger(units) && !lines.includes(units)) lines.push(units)
   return lines
 }
 
