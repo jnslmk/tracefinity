@@ -2022,7 +2022,7 @@ async def project_stack_action(project_id: str, sketch_id: str, placement_id: st
 
 
 @router.post("/bin-projects/{project_id}/sketches/{sketch_id}/assessment")
-async def assess_project_sketch(
+def assess_project_sketch(
     project_id: str, sketch_id: str,
     req: ProjectSketchUpdateRequest = ProjectSketchUpdateRequest(),
     user_id: str = Depends(get_user_id),
@@ -2043,7 +2043,7 @@ async def assess_project_sketch(
 
 @router.get("/bins/{bin_id}/height-planning")
 @router.post("/bins/{bin_id}/height-planning")
-async def bin_height_planning(bin_id: str, req: BinUpdateRequest = BinUpdateRequest(), safety_clearance_mm: float = 0, user_id: str = Depends(get_user_id)):
+def bin_height_planning(bin_id: str, req: BinUpdateRequest = BinUpdateRequest(), safety_clearance_mm: float = 0, user_id: str = Depends(get_user_id)):
     if not math.isfinite(safety_clearance_mm) or safety_clearance_mm < 0:
         raise HTTPException(status_code=400, detail="safety clearance must be finite and non-negative")
     _, user_tools, user_bins = get_stores(user_id)

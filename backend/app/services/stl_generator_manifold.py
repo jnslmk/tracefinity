@@ -583,6 +583,14 @@ def assess_printed_bin(
     ox, oy = -config.grid_x * GF_GRID / 2, -config.grid_y * GF_GRID / 2
     max_depth = wall_top - GF_BASE_HEIGHT - 2
     interior = mf.CrossSection([list(_interior_clip_rect(config).exterior.coords)[:-1]], mf.FillRule.EvenOdd)
+    slice_cache: dict[float, mf.CrossSection] = {}
+
+    def sliced(z: float) -> mf.CrossSection:
+        # ponytail: body.slice costs ~20ms and most tools share one pocket floor
+        if z not in slice_cache:
+            slice_cache[z] = body.slice(z)
+        return slice_cache[z]
+
     for prepared, raw in zip(polygons, raw_polygons):
         if len(raw.points_mm) < 3:
             geometry["seating_errors"][raw.id] = "No usable tool outline establishes a resting surface"
@@ -593,9 +601,9 @@ def assess_printed_bin(
         floor = wall_top - _resolve_pocket_depth(prepared.depth_override, config, max_depth)
         if (footprint - interior).area() > 1e-6:
             geometry["seating_errors"][raw.id] = "Tool outline cannot seat inside its generated, clipped pocket"
-        elif (footprint ^ body.slice(floor + .0001)).area() > 1e-6:
+        elif (footprint ^ sliced(floor + .0001)).area() > 1e-6:
             geometry["seating_errors"][raw.id] = "Printed material prevents seating on the intended pocket floor"
-        elif (footprint ^ body.slice(floor - .0001)).area() <= 1e-6:
+        elif (footprint ^ sliced(floor - .0001)).area() <= 1e-6:
             geometry["seating_errors"][raw.id] = "No printed support remains at the intended pocket floor"
 
     if not config.stacking_lip:

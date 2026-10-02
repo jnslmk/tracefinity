@@ -7,7 +7,12 @@ import math
 from app.models.schemas import BinPreviewTool, BinSummary, GenerateRequest
 from app.services.bin_service import sync_placed_tools
 from app.services.polygon_scaler import PolygonScaler, ScaledFingerHole, ScaledPolygon
-from app.services.stl_generator_manifold import assess_printed_bin, bin_vertical_geometry
+from app.services.stl_generator_manifold import (
+    GF_BASE_HEIGHT,
+    GF_HEIGHT_UNIT,
+    assess_printed_bin,
+    bin_vertical_geometry,
+)
 
 
 def footprint(placement, config):
@@ -45,7 +50,29 @@ def generation_polygons(bin_data, tools, prepare=True):
     return polygons
 
 
+_ASSESS_CACHE: dict[str, dict] = {}
+_ASSESS_CACHE_LIMIT = 32
+
+
 def assess_bin(bin_data, tools, gap=0, upper_config=None, relative_rotation=0, prepared=None):
+    # ponytail: ~0.5s per call and a pure function of its inputs; page reopens,
+    # window-focus replans and duplicate fires hit this instead of re-verifying
+    key = hashlib.sha256(json.dumps([
+        {"bin": bin_data.model_dump(), "gap": gap, "rotation": relative_rotation,
+         "upper": upper_config.model_dump() if upper_config else None,
+         "tools": {tid: tool.model_dump() for tid, tool in sorted(tools.items())}},
+    ], sort_keys=True).encode()).hexdigest()
+    cached = _ASSESS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    result = _assess_bin(bin_data, tools, gap, upper_config, relative_rotation, prepared)
+    if len(_ASSESS_CACHE) >= _ASSESS_CACHE_LIMIT:
+        _ASSESS_CACHE.clear()  # ponytail: crude bound, entries are content-keyed so eviction only costs recomputation
+    _ASSESS_CACHE[key] = result
+    return result
+
+
+def _assess_bin(bin_data, tools, gap=0, upper_config=None, relative_rotation=0, prepared=None):
     config = bin_data.bin_config
     request = GenerateRequest.model_validate({
         **config.model_dump(), "text_labels": [label.model_dump() for label in config.text_labels + bin_data.text_labels],
@@ -110,8 +137,26 @@ def height_proposals(bin_data, tools, gap=0):
     for strategy in ("deeper_pockets", "raised_rim"):
         candidates = []
         if measured and not current["seating_errors"]:
-            for units in (range(1, 21) if strategy == "deeper_pockets" else [bin_data.bin_config.height_units]):
-                rims = [0] if strategy == "deeper_pockets" else range(21)
+            requested = max(e["thickness_mm"] + gap for e in measured)
+            units_start, rim_start = 1, 0
+            if strategy == "deeper_pockets":
+                insert_h = bin_data.bin_config.insert_height if bin_data.bin_config.insert_enabled else 0
+                # ponytail: bodies whose pocket floor cannot reach the thickest
+                # tool fail the clearance check analytically; skip them
+                while units_start < 21 and units_start * GF_HEIGHT_UNIT - GF_BASE_HEIGHT - 2 < requested + insert_h - 1e-6:
+                    units_start += 1
+            else:
+                limits = [e["top_mm"] + gap for e in current["envelopes"] if e["top_mm"] is not None]
+                if bin_data.bin_config.insert_enabled:
+                    limits += [e["resting_z_mm"] + gap for e in current["envelopes"] if e["resting_z_mm"] is not None]
+                wall_top = bin_data.bin_config.height_units * GF_HEIGHT_UNIT
+                need = max(limits, default=0.0)
+                # ponytail: rims below this cannot clear the tools even with an
+                # ideal zero-drop mating; skipped rims can only fail
+                while rim_start < 21 and wall_top + rim_start * GF_HEIGHT_UNIT < need - 1e-6:
+                    rim_start += 1
+            for units in (range(units_start, 21) if strategy == "deeper_pockets" else [bin_data.bin_config.height_units]):
+                rims = [0] if strategy == "deeper_pockets" else range(rim_start, 21)
                 for rim in rims:
                     candidate = bin_data.model_copy(update={
                         "bin_config": bin_data.bin_config.model_copy(),
@@ -122,7 +167,6 @@ def height_proposals(bin_data, tools, gap=0):
                     candidate.bin_config.stacking_lip = True
                     changes = []
                     if strategy == "deeper_pockets":
-                        requested = max(e["thickness_mm"] + gap for e in measured)
                         candidate.bin_config.cutout_depth = max(0.25, requested)
                         for placed in candidate.placed_tools:
                             envelope = measured_by_id.get(placed.id)
