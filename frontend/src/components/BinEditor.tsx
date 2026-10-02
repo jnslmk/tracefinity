@@ -18,6 +18,7 @@ interface Props {
   partialBins: boolean
   partialBinsValues: boolean[]
   wallThickness: number
+  stackingLip?: boolean
   defaultCutoutDepth: number
   maxCutoutDepth: number
   halfGridBase?: boolean
@@ -68,6 +69,7 @@ export function BinEditor({
   partialBins,
   partialBinsValues,
   wallThickness,
+  stackingLip,
   defaultCutoutDepth,
   maxCutoutDepth,
   halfGridBase,
@@ -161,6 +163,8 @@ export function BinEditor({
         body: JSON.stringify({
           tool_ids: placedTools.map(t => t.tool_id),
           clearance: 1.0,
+          // partial config is enough: the backend derives the usable interior
+          bin_config: { grid_x: gridX, grid_y: gridY, wall_thickness: wallThickness, stacking_lip: stackingLip },
         }),
       })
       if (!res.ok) {
@@ -217,7 +221,7 @@ export function BinEditor({
     } finally {
       setArranging(false)
     }
-  }, [placedTools, onPlacedToolsChange, arranging])
+  }, [placedTools, onPlacedToolsChange, arranging, binWidthMm, binHeightMm])
 
   const screenToMm = useCallback((clientX: number, clientY: number) => {
     if (!svgRef.current) return { x: 0, y: 0 }

@@ -24,8 +24,8 @@ from app.auth import get_user_id, require_instance_admin
 from app.config import ensure_user_dirs, settings
 from app.constants import GF_GRID, MAX_BIN_GRID_CELLS, MAX_BIN_GRID_UNITS
 from app.models.schemas import (
-    BaseModel,
     DEFAULT_SKETCH_NAME,
+    BaseModel,
     BinConfig,
     BinDefaults,
     BinListResponse,
@@ -2266,6 +2266,7 @@ async def create_bin(request: Request, req: CreateBinRequest, user_id: str = Dep
 class AutoLayoutRequest(BaseModel):
     tool_ids: list[str] = []
     clearance: float = 1.0
+    bin_config: BinConfig | None = None
 
 
 class AutoLayoutResponse(BaseModel):
@@ -2275,10 +2276,11 @@ class AutoLayoutResponse(BaseModel):
 
 
 @router.post("/bins/auto-layout", response_model=AutoLayoutResponse)
-async def auto_layout_bin(req: AutoLayoutRequest, user_id: str = Depends(get_user_id)):
+def auto_layout_bin(req: AutoLayoutRequest, user_id: str = Depends(get_user_id)):
     """Compute an auto-layout for the given tools without creating a bin."""
-    from app.services.auto_layout import auto_layout, layout_bounds, layout_efficiency
     from shapely.geometry import Polygon as ShapelyPolygon
+
+    from app.services.auto_layout import auto_layout, layout_bounds, layout_efficiency
 
     _, user_tools, _ = get_stores(user_id)
 
@@ -2287,6 +2289,8 @@ async def auto_layout_bin(req: AutoLayoutRequest, user_id: str = Depends(get_use
         tool = user_tools.get(tid)
         if not tool:
             raise HTTPException(status_code=404, detail=f"tool {tid} not found")
+        if len(tool.points) < 3:
+            continue  # degenerate outline cannot form a polygon
         points = [(p.x, p.y) for p in tool.points]
         tools.append({
             "id": tid,
@@ -2297,7 +2301,25 @@ async def auto_layout_bin(req: AutoLayoutRequest, user_id: str = Depends(get_use
     # Sort by height descending for better packing of long thin tools
     tools.sort(key=lambda t: t["polygon"].bounds[3] - t["polygon"].bounds[1], reverse=True)
 
-    placed = auto_layout(tools, clearance=req.clearance)
+    # pack into the usable interior: outlines outside the interior clip rect
+    # cannot seat in their pocket and the height assessment refuses to verify
+    offset_x = offset_y = 0.0
+    bin_width = bin_depth = None
+    if req.bin_config:
+        from app.services.stl_generator_manifold import _interior_clip_rect
+
+        rect = _interior_clip_rect(req.bin_config)
+        bin_width = rect.bounds[2] - rect.bounds[0]
+        bin_depth = rect.bounds[3] - rect.bounds[1]
+        offset_x = (req.bin_config.grid_x * GF_GRID - bin_width) / 2
+        offset_y = (req.bin_config.grid_y * GF_GRID - bin_depth) / 2
+
+    placed = auto_layout(
+        tools,
+        clearance=req.clearance,
+        bin_width=bin_width,
+        bin_depth=bin_depth,
+    )
 
     if not placed:
         raise HTTPException(status_code=400, detail="no tools to layout")
@@ -2307,14 +2329,15 @@ async def auto_layout_bin(req: AutoLayoutRequest, user_id: str = Depends(get_use
         placements.append({
             "tool_id": p.tool_id,
             "name": p.name,
-            "x": p.x,
-            "y": p.y,
+            "x": p.x + offset_x,
+            "y": p.y + offset_y,
             "rotation": p.rotation,
         })
 
+    bounds = layout_bounds(placed)
     return AutoLayoutResponse(
         placements=placements,
-        bounds=layout_bounds(placed),
+        bounds=(bounds[0] + offset_x, bounds[1] + offset_y, bounds[2] + offset_x, bounds[3] + offset_y),
         efficiency=layout_efficiency(placed),
     )
 
