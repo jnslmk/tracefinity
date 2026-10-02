@@ -197,6 +197,9 @@ cd ..
 
 # Run (starts backend on :8000 and frontend on :4001)
 make dev
+
+# Stop the dev servers (also runs automatically before `make dev`)
+make stop
 ```
 
 Open http://localhost:4001
