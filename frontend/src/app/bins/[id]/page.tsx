@@ -10,12 +10,14 @@ import { ToolBrowser } from '@/components/ToolBrowser'
 import { getBin, updateBin, generateBinStl, getBinStlUrl, getBinZipUrl, getBinThreemfUrl, getBinInsertUrl, getImageUrl, listTools, updateTool } from '@/lib/api'
 import { buildBinConfig, createPartialBinsValues, getDefaultBinConfig, resetDefaultBinConfig, saveDefaultBinConfig } from '@/lib/binDefaults'
 import { downloadExport } from '@/lib/download'
-import type { BinConfig, BinData, BinHeightPlanning, HeightProposal, PlacedTool, TextLabel } from '@/types'
+import type { BinConfig, BinData, HeightProposal, PlacedTool, TextLabel } from '@/types'
 import { Download, Loader2, Package, ChevronDown, Check, TriangleAlert } from 'lucide-react'
 import { Breadcrumb } from '@/components/Breadcrumb'
 import { Alert } from '@/components/Alert'
 import { useDebouncedSave } from '@/hooks/useDebouncedSave'
 import { useProjectSource } from '@/hooks/useProjectSource'
+import { useBinHistory } from '@/hooks/useBinHistory'
+import type { BinSnapshot } from '@/hooks/useBinHistory'
 import {
   getGridSizeError,
   gridCellCount,
@@ -24,6 +26,7 @@ import {
   MAX_GRID_UNITS,
   requiredGridUnits,
 } from '@/lib/constants'
+import type { GridSizingMode } from '@/lib/constants'
 import { useTheme } from '@/hooks/useTheme'
 import { cn } from '@/lib/utils'
 
@@ -65,26 +68,66 @@ export default function BinPage() {
   const doGenerateRef = useRef<() => void>(() => {})
   const [smoothedToolIds, setSmoothedToolIds] = useState<Set<string>>(new Set())
   const [smoothLevels, setSmoothLevels] = useState<Map<string, number>>(new Map())
-  const [heightPlan, setHeightPlan] = useState<BinHeightPlanning | null>(null)
-  const fitProposal = heightPlan?.alternatives.find(a => a.strategy === 'deeper_pockets' && a.bin_config) ?? null
 
-  const applyHeightProposal = useCallback(async (proposal: HeightProposal) => {
-    if (!proposal.bin_config || !proposal.placed_tools) return
-    setConfig(proposal.bin_config)
-    setPlacedTools(proposal.placed_tools)
-    lastGenerateRef.current = ''
-  }, [])
   const smoothLevelTimerRef = useRef<NodeJS.Timeout | null>(null)
 
-  const [autoSize, setAutoSize] = useState(true)
+  const [gridSizingMode, setGridSizingMode] = useState<GridSizingMode>('auto')
+  const packedLayoutRef = useRef<{
+    tools: PlacedTool[]; gridX: number; gridY: number; sizingSettings: string
+  } | null>(null)
+  const sizingSettings = JSON.stringify([
+    gridSizingMode, config.wall_thickness, config.stacking_lip,
+    config.cutout_clearance, config.half_grid_base,
+  ])
+  const packedLayout = packedLayoutRef.current
+  const packedLayoutIsCurrent = gridSizingMode === 'fixed_depth'
+    && packedLayout?.tools === placedTools
+    && packedLayout.gridX === config.grid_x
+    && packedLayout.gridY === config.grid_y
+    && packedLayout.sizingSettings === sizingSettings
   const [isDragging, setIsDragging] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
   const [defaultsStatus, setDefaultsStatus] = useState<string | null>(null)
   const defaultsStatusTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const exportRef = useRef<HTMLDivElement>(null)
+  const [historyRevision, setHistoryRevision] = useState(0)
+  const sizingPendingRef = useRef(false)
+  const preservedLayoutRef = useRef<BinSnapshot | null>(null)
+  const preserveLayout = preservedLayoutRef.current
+  const layoutIsPreserved = preserveLayout?.placedTools === placedTools
+    && preserveLayout.config === config && preserveLayout.gridSizingMode === gridSizingMode
+  const snapshot = useMemo(() => ({ config, placedTools, textLabels, name, gridSizingMode }),
+    [config, placedTools, textLabels, name, gridSizingMode])
+  const restoreHistory = useCallback((value: BinSnapshot) => {
+    preservedLayoutRef.current = value
+    packedLayoutRef.current = null
+    setConfig(value.config)
+    setPlacedTools(value.placedTools)
+    setTextLabels(value.textLabels)
+    setName(value.name)
+    setGridSizingMode(value.gridSizingMode)
+    setHistoryRevision(revision => revision + 1)
+    setWarning(null)
+    setError(null)
+  }, [])
+  const history = useBinHistory(snapshot, restoreHistory,
+    !loading && binData?.id === binId && !binData.imported_model && !isDragging)
+  const { mark: markHistory, reset: resetHistory } = history
+  const markAction = useCallback((label: string, resize = true) => {
+    if (resize) preservedLayoutRef.current = null
+    markHistory(label)
+  }, [markHistory])
+  const applyHeightProposal = useCallback(async (proposal: HeightProposal) => {
+    if (!proposal.bin_config || !proposal.placed_tools) return
+    markAction('Apply height plan')
+    setConfig(proposal.bin_config)
+    setPlacedTools(proposal.placed_tools)
+    lastGenerateRef.current = ''
+  }, [markAction])
 
+  const hasPins = placedTools.some(tool => tool.pinned)
   const requiredGridSize = useMemo(() => {
-    if (!autoSize || placedTools.length === 0) return null
+    if (gridSizingMode === 'fixed' || placedTools.length === 0) return null
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for (const tool of placedTools) {
@@ -96,24 +139,30 @@ export default function BinPage() {
       }
     }
 
-    const halfMargin = config.wall_thickness + config.cutout_clearance + 0.25
+    // The enabled lip intrudes 2.6mm from the exterior, matching the generator.
+    const wallInset = (gridSizingMode === 'fixed_depth' || hasPins) && config.stacking_lip
+      ? Math.max(config.wall_thickness, 2.6) : config.wall_thickness
+    const halfMargin = wallInset + config.cutout_clearance + 0.25
     const totalMargin = 2 * halfMargin
     return {
-      x: requiredGridUnits(maxX - minX, totalMargin, config.half_grid_base),
-      y: requiredGridUnits(maxY - minY, totalMargin, config.half_grid_base),
+      x: packedLayoutIsCurrent ? config.grid_x : requiredGridUnits(hasPins ? maxX : maxX - minX, hasPins ? halfMargin : totalMargin, config.half_grid_base),
+      y: gridSizingMode === 'fixed_depth' ? config.grid_y : requiredGridUnits(hasPins ? maxY : maxY - minY, hasPins ? halfMargin : totalMargin, config.half_grid_base),
+      depthOverflow: gridSizingMode === 'fixed_depth' && (hasPins ? maxY + halfMargin : maxY - minY + totalMargin) > config.grid_y * GRID_UNIT + 1e-6,
       minX,
       minY,
       maxX,
       maxY,
     }
-  }, [autoSize, placedTools, config.wall_thickness, config.cutout_clearance, config.half_grid_base])
+  }, [gridSizingMode, placedTools, hasPins, config.grid_x, config.grid_y, config.wall_thickness, config.stacking_lip, config.cutout_clearance, config.half_grid_base, packedLayoutIsCurrent])
 
   const requiredGridError = requiredGridSize
     ? getGridSizeError(requiredGridSize.x, requiredGridSize.y)
     : null
   const gridLimitError = requiredGridSize && requiredGridError
     ? `Layout requires ${requiredGridSize.x}×${requiredGridSize.y} grid units (${gridCellCount(requiredGridSize.x, requiredGridSize.y)} cells). The maximum is ${MAX_GRID_UNITS} units per axis and ${MAX_GRID_CELLS} cells total. Reduce or rearrange the tools; preview and export are paused, but edits continue to save.`
-    : null
+    : requiredGridSize?.depthOverflow
+      ? `Tools exceed the usable interior of the fixed ${config.grid_y}u depth. Rotate or rearrange them, increase Grid Depth, or remove tools; preview and export are paused, but edits continue to save.`
+      : null
 
   useEffect(() => {
     if (!exportOpen) return
@@ -127,19 +176,26 @@ export default function BinPage() {
   }, [exportOpen])
 
   useEffect(() => {
+    let cancelled = false
     async function load() {
+      setLoading(true)
+      setBinData(null)
+      setError(null)
+      packedLayoutRef.current = null
       let imported = false
       try {
         // the bin itself first: an imported bin needs no tool library, no config
         // sync and no editor generation, and must not depend on listTools()
         const data = await getBin(binId)
-        setBinData(data)
+        if (cancelled) return
         if (data.imported_model) {
           imported = true
+          setBinData(data)
           return
         }
 
         const tools = await listTools()
+        if (cancelled) return
         const toolMap = new Map(tools.map(t => [t.id, t]))
         const synced = data.placed_tools.map(pt => {
           const lib = toolMap.get(pt.tool_id)
@@ -161,18 +217,31 @@ export default function BinPage() {
         setPlacedTools(synced)
         setTextLabels(data.text_labels)
         setName(data.name || '')
-        setConfig(buildBinConfig(data.bin_config));
+        const loadedConfig = buildBinConfig(data.bin_config)
+        setConfig(loadedConfig)
+        const loadedSnapshot = {
+          config: loadedConfig, placedTools: synced, textLabels: data.text_labels,
+          name: data.name || '', gridSizingMode: 'auto' as const,
+        }
+        setGridSizingMode('auto')
+        preservedLayoutRef.current = loadedSnapshot
+        resetHistory(loadedSnapshot)
+        setHistoryRevision(revision => revision + 1)
         setSmoothedToolIds(new Set(tools.filter(t => t.smoothed).map(t => t.id)))
         setSmoothLevels(new Map(tools.map(t => [t.id, t.smooth_level])))
+        setBinData(data)
       } catch {
-        setError('Bin not found')
+        if (!cancelled) setError('Bin not found')
       } finally {
-        setLoading(false)
-        if (!imported) setTimeout(() => doGenerateRef.current(), 100)
+        if (!cancelled) {
+          setLoading(false)
+          if (!imported) setTimeout(() => doGenerateRef.current(), 100)
+        }
       }
     }
     load()
-  }, [binId])
+    return () => { cancelled = true }
+  }, [binId, resetHistory])
 
   const doGenerate = useCallback(async () => {
     // uploaded bins are never regenerated: the stored mesh is served back as-is
@@ -244,7 +313,7 @@ export default function BinPage() {
 
   const { saving, saved, error: saveError } = useDebouncedSave(
     async () => {
-      if (!binData || binData.imported_model) return
+      if (loading || !binData || binData.imported_model) return
       await updateBin(binId, {
         name: name || undefined,
         bin_config: config,
@@ -252,7 +321,7 @@ export default function BinPage() {
         text_labels: textLabels,
       })
     },
-    [binData, binId, name, config, placedTools, textLabels],
+    [loading, binData, binId, name, config, placedTools, textLabels],
     150,
     { skipInitial: true }
   )
@@ -275,17 +344,35 @@ export default function BinPage() {
     }
   }, [binData, placedTools, config, textLabels, smoothedToolIds, smoothLevels, doGenerate])
 
-  const handlePlacedToolsChange = useCallback((updated: PlacedTool[]) => {
+  const handlePlacedToolsChange = useCallback((updated: PlacedTool[], label = 'Edit tools') => {
+    markAction(label)
     setPlacedTools(updated)
-  }, [])
+  }, [markAction])
 
-  // auto-size: fit grid to bounding box of all placed tools, recentre if grid changes
+  const handleAutoArrange = useCallback((updated: PlacedTool[], computedWidth: number | null) => {
+    markAction('Auto-arrange tools')
+    if (gridSizingMode === 'fixed_depth' && computedWidth !== null) {
+      packedLayoutRef.current = {
+        tools: updated, gridX: computedWidth, gridY: config.grid_y, sizingSettings,
+      }
+      setConfig(prev => ({
+        ...prev,
+        grid_x: computedWidth,
+        partial_bins_values: createPartialBinsValues(computedWidth, prev.grid_y),
+      }))
+    }
+    setPlacedTools(updated)
+  }, [gridSizingMode, config.grid_y, sizingSettings, markAction])
+
+  // Manual edits fit the computed axes; keep the server's packed width/placements.
   useEffect(() => {
-    if (isDragging || !requiredGridSize || requiredGridError) return
+    sizingPendingRef.current = false
+    if (loading || isDragging || layoutIsPreserved || !requiredGridSize || requiredGridError || packedLayoutIsCurrent) return
     const { x: needX, y: needY, minX, minY, maxX, maxY } = requiredGridSize
 
     const gridChanged = config.grid_x !== needX || config.grid_y !== needY
     if (gridChanged) {
+      sizingPendingRef.current = true
         setConfig((prev) => ({
             ...prev,
             grid_x: needX,
@@ -293,6 +380,7 @@ export default function BinPage() {
             partial_bins_values: createPartialBinsValues(needX, needY),
         }));
     }
+    if (hasPins) return
 
     // recentre tools if grid changed or tools are off-centre
     const binW = (gridChanged ? needX : config.grid_x) * GRID_UNIT
@@ -302,6 +390,7 @@ export default function BinPage() {
     const dx = binW / 2 - toolCx
     const dy = binH / 2 - toolCy
     if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+      sizingPendingRef.current = true
       setPlacedTools(prev => prev.map(tool => ({
         ...tool,
         points: tool.points.map(p => ({ x: p.x + dx, y: p.y + dy })),
@@ -311,7 +400,11 @@ export default function BinPage() {
         ),
       })))
     }
-  }, [isDragging, requiredGridSize, requiredGridError, placedTools, config.grid_x, config.grid_y])
+  }, [loading, isDragging, layoutIsPreserved, requiredGridSize, requiredGridError, placedTools, hasPins, config.grid_x, config.grid_y, packedLayoutIsCurrent])
+
+  useEffect(() => {
+    if (!sizingPendingRef.current) history.commit()
+  })
 
   const handleToggleSmoothed = useCallback(async (toolId: string, smoothed: boolean) => {
     try {
@@ -334,6 +427,7 @@ export default function BinPage() {
   }, [])
 
   const handleAddTool = useCallback((tool: PlacedTool) => {
+    markAction(`Add ${tool.name}`)
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for (const p of tool.points) {
       minX = Math.min(minX, p.x)
@@ -344,9 +438,12 @@ export default function BinPage() {
     const toolW = maxX - minX
     const toolH = maxY - minY
 
-    const margin = 2 * config.wall_thickness + 2 * config.cutout_clearance + 0.5;
-    const needX = Math.max(config.grid_x, requiredGridUnits(toolW, margin, config.half_grid_base));
-    const needY = Math.max(config.grid_y, requiredGridUnits(toolH, margin, config.half_grid_base));
+    const wallInset = gridSizingMode === 'fixed_depth' && config.stacking_lip
+      ? Math.max(config.wall_thickness, 2.6) : config.wall_thickness
+    const margin = 2 * (wallInset + config.cutout_clearance) + 0.5
+    const needX = Math.max(config.grid_x, requiredGridUnits(toolW, margin, config.half_grid_base))
+    const needY = gridSizingMode === 'fixed_depth'
+      ? config.grid_y : Math.max(config.grid_y, requiredGridUnits(toolH, margin, config.half_grid_base))
     const candidateIsValid = getGridSizeError(needX, needY) === null
 
     if (candidateIsValid && (needX !== config.grid_x || needY !== config.grid_y)) {
@@ -375,7 +472,7 @@ export default function BinPage() {
     }
 
     setPlacedTools(prev => [...prev, placed])
-  }, [config.grid_x, config.grid_y, config.wall_thickness, config.cutout_clearance, config.half_grid_base])
+  }, [config.grid_x, config.grid_y, config.wall_thickness, config.stacking_lip, config.cutout_clearance, config.half_grid_base, gridSizingMode, markAction])
 
   // the retention sweep purges exports, so a stale tab's file may be gone;
   // downloadExport regenerates from saved state and retries before failing
@@ -422,6 +519,7 @@ export default function BinPage() {
   }
 
   function handleResetDefaults() {
+    markAction('Reset bin configuration')
     setConfig(resetDefaultBinConfig())
     showDefaultsStatus('Defaults reset')
   }
@@ -466,7 +564,10 @@ export default function BinPage() {
             <div className="flex items-center gap-2 mb-3">
               <Breadcrumb segments={[
                 { label: projectSource.rootLabel, href: projectSource.rootHref },
-                { label: name || 'Untitled', editable: true, onEdit: (v) => setName(v) },
+                { label: name || 'Untitled', editable: true, onEdit: (v) => {
+                  markAction('Rename bin', false)
+                  setName(v)
+                } },
               ]} />
               {saving && <Loader2 className="w-3 h-3 animate-spin text-text-muted flex-shrink-0" />}
               {saved && !saveError && <Check className="w-3 h-3 text-green-400 flex-shrink-0" />}
@@ -484,11 +585,9 @@ export default function BinPage() {
             )}
             <BinConfigurator
               config={config}
-              onChange={setConfig}
-              autoSize={autoSize}
-              onAutoSizeChange={setAutoSize}
-              fitHeight={fitProposal?.bin_config?.height_units ?? null}
-              onAutoFit={() => { if (fitProposal) void applyHeightProposal(fitProposal) }}
+              onChange={value => { markAction('Change bin configuration'); setConfig(value) }}
+              gridSizingMode={gridSizingMode}
+              onGridSizingModeChange={value => { markAction('Change grid sizing'); setGridSizingMode(value) }}
             />
             <div className="mt-3 border-t border-border pt-3 space-y-1.5">
               <div className="flex gap-1.5">
@@ -514,6 +613,32 @@ export default function BinPage() {
             </div>
           </div>
 
+          <div className="glass rounded-[10px] px-3 py-3 space-y-2">
+            <div className="flex gap-1.5">
+              <button type="button" onClick={history.undo} disabled={isDragging || !history.canUndo}
+                title="Undo (Ctrl/Cmd+Z)" className="btn-secondary flex-1 px-2 py-1.5 text-[11px] disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-accent">
+                Undo
+              </button>
+              <button type="button" onClick={history.redo} disabled={isDragging || !history.canRedo}
+                title="Redo (Ctrl/Cmd+Shift+Z)" className="btn-secondary flex-1 px-2 py-1.5 text-[11px] disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-accent">
+                Redo
+              </button>
+            </div>
+            <details className="text-[11px] text-text-secondary">
+              <summary className="cursor-pointer rounded focus-visible:outline-2 focus-visible:outline-accent">Action history</summary>
+              <ol aria-label="Bin action history" className="mt-2 space-y-1">
+                {history.entries.map((entry, index) => (
+                  <li key={index} aria-current={index === history.index ? 'step' : undefined}
+                    className={index === history.index ? 'text-text-primary font-medium' : 'text-text-secondary'}>
+                    {entry.label}
+                    <span className="text-text-muted">{index === history.index ? ' · Current' : index > history.index ? ' · Undone' : ''}</span>
+                  </li>
+                ))}
+              </ol>
+              <p className="mt-2 text-text-muted">This session only. Typing uses native text undo.</p>
+            </details>
+          </div>
+
           <div className="glass rounded-[10px] px-3 py-3">
             <h3 className="text-[10px] font-semibold text-text-muted uppercase tracking-[1.5px] mb-2">Dimensions</h3>
             <div className="text-[11px] text-text-secondary space-y-0.5">
@@ -522,12 +647,13 @@ export default function BinPage() {
               <div className="flex justify-between"><span>Height</span><span>{(config.height_units * 7 + effectiveRimUnits * 7 + (config.stacking_lip ? 4.4 : 0)).toFixed(1)} mm</span></div>
             </div>
           </div>
-          <BinHeightPlanner binId={binId} config={config} placedTools={placedTools} onApply={applyHeightProposal} onPlan={setHeightPlan} />
+          <BinHeightPlanner binId={binId} config={config} placedTools={placedTools} onApply={applyHeightProposal}
+            onRemove={id => handlePlacedToolsChange(placedTools.filter(tool => tool.id !== id), 'Remove tool')} />
         </div>
 
         {/* export buttons */}
         <div className="p-3 flex-shrink-0 space-y-1.5">
-          {gridLimitError && <Alert variant="warning">{gridLimitError}</Alert>}
+          {gridLimitError && <div role="alert"><Alert variant="warning">{gridLimitError}</Alert></div>}
           {error && <Alert variant="error">{error}</Alert>}
           {warning && (
             <InfoBanner>{warning}</InfoBanner>
@@ -613,7 +739,7 @@ export default function BinPage() {
                 placedTools={placedTools}
                 onPlacedToolsChange={handlePlacedToolsChange}
                 textLabels={textLabels}
-                onTextLabelsChange={setTextLabels}
+                onTextLabelsChange={(value, label = 'Edit labels') => { markAction(label, false); setTextLabels(value) }}
                 gridX={config.grid_x}
                 gridY={config.grid_y}
                 partialBins={config.partial_bins}
@@ -623,12 +749,16 @@ export default function BinPage() {
                 defaultCutoutDepth={config.cutout_depth}
                 maxCutoutDepth={calcMaxCutoutDepth(config.height_units)}
                 halfGridBase={config.half_grid_base}
+                cutoutClearance={config.cutout_clearance}
+                gridSizingMode={gridSizingMode}
+                onAutoArrange={handleAutoArrange}
                 onEditTool={(toolId) => router.push(projectSource.scopedHref(`/tools/${toolId}`))}
                 smoothedToolIds={smoothedToolIds}
                 onToggleSmoothed={handleToggleSmoothed}
                 smoothLevels={smoothLevels}
                 onSmoothLevelChange={handleSmoothLevelChange}
                 onDraggingChange={setIsDragging}
+                historyRevision={historyRevision}
               />
             </div>
 
@@ -673,7 +803,7 @@ export default function BinPage() {
                       <span>Generating...</span>
                     </>
                   ) : gridLimitError ? (
-                    <span className="max-w-xs px-4 text-center">Layout is too large to generate. Your edits are still saved.</span>
+                    <span className="max-w-xs px-4 text-center">Layout does not fit the usable grid. Your edits are still saved.</span>
                   ) : placedTools.length === 0 ? (
                     <span>Add tools to see preview</span>
                   ) : (

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { MousePointer2, Trash2, Magnet, Type, Pencil, Maximize2 } from 'lucide-react'
+import { MousePointer2, Trash2, Magnet, Type, Pencil, Maximize2, Pin, PinOff } from 'lucide-react'
 import type { FingerHole, PlacedTool, TextLabel } from '@/types'
 import { SNAP_GRID_MIN, SNAP_GRID_MAX } from '@/lib/constants'
 import { cutoutShapeLabel, isRectangularCutout } from '@/lib/cutouts'
@@ -83,12 +83,14 @@ interface Props {
   snapGrid: number
   setSnapGrid: (grid: number) => void
   handleRecenter: () => void
+  recenterDisabled?: boolean
   selectedTool: PlacedTool | null
   selectedLabel: TextLabel | null
   selectedHole: FingerHole | null
   selectedHoleToolId: string | null
   onEditTool?: (toolId: string) => void
   onRemoveTool: () => void
+  onTogglePinned?: () => void
   onRemoveLabel: () => void
   smoothedToolIds?: Set<string>
   smoothLevels?: Map<string, number>
@@ -113,12 +115,14 @@ export function BinEditorToolbar({
   snapGrid,
   setSnapGrid,
   handleRecenter,
+  recenterDisabled = false,
   selectedTool,
   selectedLabel,
   selectedHole,
   selectedHoleToolId,
   onEditTool,
   onRemoveTool,
+  onTogglePinned,
   onRemoveLabel,
   smoothedToolIds,
   smoothLevels,
@@ -172,8 +176,9 @@ export function BinEditorToolbar({
       )}
       <button
         onClick={handleRecenter}
-        className={`${tbBtn} ${tbInactive}`}
-        title="Recenter view"
+        disabled={recenterDisabled}
+        className={`${tbBtn} ${tbInactive} disabled:opacity-50 disabled:cursor-not-allowed`}
+        title={recenterDisabled ? 'Unpin tools before recentering the layout' : 'Recenter layout'}
       >
         <Maximize2 className="w-3.5 h-3.5" />
         Recenter
@@ -182,6 +187,20 @@ export function BinEditorToolbar({
       {selectedTool && (
         <>
           <div className="w-px h-4 bg-glass-border mx-1 flex-shrink-0" />
+          {onTogglePinned && (
+            <button
+              type="button"
+              onClick={onTogglePinned}
+              aria-pressed={!!selectedTool.pinned}
+              className={`${tbBtn} ${selectedTool.pinned ? tbActive : tbInactive} focus-visible:outline-2 focus-visible:outline-accent`}
+              title="Keep this placement during auto-arrange. Manual movement and rotation remain available."
+            >
+              {selectedTool.pinned
+                ? <PinOff aria-hidden="true" className="w-3.5 h-3.5" />
+                : <Pin aria-hidden="true" className="w-3.5 h-3.5" />}
+              {selectedTool.pinned ? 'Unpin' : 'Pin'}
+            </button>
+          )}
           {onToggleSmoothed && (
             <div className="flex items-center rounded-[6px] overflow-hidden border border-glass-border">
               <button

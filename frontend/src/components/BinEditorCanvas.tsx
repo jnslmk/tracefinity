@@ -197,6 +197,20 @@ export function BinEditorCanvas({
                   defaultCutoutDepth={tool.depth_override ?? defaultCutoutDepth}
                   onMouseDown={(holeId, e) => onHoleClick(tool.id, holeId, e)}
                 />
+                {tool.pinned && (
+                  <g
+                    role="img"
+                    aria-label={`${tool.name}: pinned for auto-arrange`}
+                    className="pointer-events-none"
+                    transform={`translate(${Math.min(...tool.points.map(point => point.x)) * DISPLAY_SCALE}, ${Math.min(...tool.points.map(point => point.y)) * DISPLAY_SCALE})`}
+                  >
+                    <title>Pinned — manual movement and rotation remain available</title>
+                    <rect width={handleR * 3.5} height={handleR * 1.4} rx={handleR * 0.25} fill="#0f172a" stroke="#f8fafc" strokeWidth={handleStroke} />
+                    <text x={handleR * 1.75} y={handleR * 0.75} textAnchor="middle" dominantBaseline="central" fill="#f8fafc" fontSize={handleR * 0.85} fontWeight="600">
+                      Pinned
+                    </text>
+                  </g>
+                )}
               </g>
             )
           })}

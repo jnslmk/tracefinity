@@ -1,12 +1,14 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
+import { hashKey, useQuery } from '@tanstack/react-query'
 import { planBinHeight } from '@/lib/api'
-import { Info } from 'lucide-react'
-import type { BinConfig, BinHeightPlanning, HeightProposal, PlacedTool } from '@/types'
+import { Check, CircleHelp, Info, X } from 'lucide-react'
+import type { BinConfig, HeightProposal, PlacedTool } from '@/types'
 import { NumericInput } from '@/components/NumericInput'
 import { createPartialBinsValues } from '@/lib/binDefaults'
 import { MAX_GRID_UNITS, maxGridUnitsForOtherAxis } from '@/lib/constants'
+import type { GridSizingMode } from '@/lib/constants'
 import { BED_SIZE_MAX_MM, BED_SIZE_MIN_MM } from '@/lib/settings'
 import { cn } from '@/lib/utils'
 import { ClassValue } from 'clsx'
@@ -22,10 +24,8 @@ export function calcMaxCutoutDepth(heightUnits: number): number {
 interface Props {
   config: BinConfig
   onChange: (config: BinConfig) => void
-  autoSize?: boolean
-  onAutoSizeChange?: (v: boolean) => void
-  fitHeight?: number | null
-  onAutoFit?: () => void
+  gridSizingMode?: GridSizingMode
+  onGridSizingModeChange?: (mode: GridSizingMode) => void
 }
 
 function HelpTip({ text }: { text: string }) {
@@ -95,18 +95,21 @@ function SliderRow({
   disabled?: boolean
 }) {
   const pct = sliderMax > min ? ((value - min) / (sliderMax - min)) * 100 : 0
+  const id = useId()
 
   return (
     <div className={`relative space-y-1.5 py-2 ${disabled ? 'opacity-40 pointer-events-none' : ''}`}>
-      <span className="text-xs text-text-primary tracking-[0.3px]">
+      <label htmlFor={id} className="text-xs text-text-primary tracking-[0.3px]">
         {label}
         {help && <HelpTip text={help} />}
-      </span>
+      </label>
       <div className="flex items-center gap-2">
         <input
+          id={id}
           type="range"
           min={min}
           max={sliderMax}
+          aria-label={label}
           step={step}
           value={value}
           disabled={disabled}
@@ -117,7 +120,7 @@ function SliderRow({
           className="flex-1 min-w-0"
           style={{ '--slider-pct': `${pct}%` } as React.CSSProperties}
         />
-        <div className="flex items-center gap-1">
+        <label aria-label={`${label} value`} className="flex items-center gap-1">
           <NumericInput
             min={min}
             max={max}
@@ -128,7 +131,7 @@ function SliderRow({
             className="w-14 h-7 bg-elevated text-right text-xs font-semibold text-text-primary rounded pr-2 focus:outline-none"
           />
           {unit && <span className="text-[10px] text-text-muted w-5">{unit}</span>}
-        </div>
+        </label>
       </div>
     </div>
   )
@@ -165,7 +168,7 @@ function HintBanner({ children }: { children: React.ReactNode }) {
   )
 }
 
-export function BinConfigurator({ config, onChange, autoSize, onAutoSizeChange, fitHeight, onAutoFit }: Props) {
+export function BinConfigurator({ config, onChange, gridSizingMode, onGridSizingModeChange }: Props) {
   function update(partial: Partial<BinConfig>) {
     onChange({ ...config, ...partial })
   }
@@ -174,17 +177,25 @@ export function BinConfigurator({ config, onChange, autoSize, onAutoSizeChange, 
   const binWidth = config.grid_x * 42
   const binDepth = config.grid_y * 42
   const needsSplit = config.bed_size > 0 && (binWidth > config.bed_size || binDepth > config.bed_size)
+  const sizingId = useId()
   const exportsSeparateParts = config.partial_bins && !config.partial_bins_connect && config.partial_bins_values.some((enabled) => !enabled);
 
   return (
     <div className="space-y-0">
-      {onAutoSizeChange && (
-        <Toggle
-          label="Auto-size grid"
-          help="Automatically fit grid to placed tools. Turn off to set grid size manually."
-          checked={!!autoSize}
-          onChange={onAutoSizeChange}
-        />
+      {onGridSizingModeChange && (
+        <div className="space-y-1.5 py-2">
+          <label htmlFor={sizingId} className="text-xs text-text-primary">Grid sizing</label>
+          <select
+            id={sizingId}
+            value={gridSizingMode}
+            onChange={e => onGridSizingModeChange(e.target.value as GridSizingMode)}
+            className="w-full rounded bg-elevated px-2 py-1.5 text-xs text-text-primary focus-visible:outline-2 focus-visible:outline-accent"
+          >
+            <option value="auto">Auto width and depth</option>
+            <option value="fixed">Fixed width and depth</option>
+            <option value="fixed_depth">Fixed depth, auto width</option>
+          </select>
+        </div>
       )}
 
       <SliderRow
@@ -202,7 +213,7 @@ export function BinConfigurator({ config, onChange, autoSize, onAutoSizeChange, 
               partial_bins_values: createPartialBinsValues(v, config.grid_y),
           })
         }
-        disabled={autoSize}
+        disabled={gridSizingMode === 'auto' || gridSizingMode === 'fixed_depth'}
       />
 
       <SliderRow
@@ -210,17 +221,21 @@ export function BinConfigurator({ config, onChange, autoSize, onAutoSizeChange, 
         help="Bin depth in gridfinity units (42mm each). Half-unit increments (21mm) supported."
         value={config.grid_y}
         min={1}
-        max={maxGridUnitsForOtherAxis(config.grid_x)}
+        max={gridSizingMode === 'fixed_depth' ? MAX_GRID_UNITS : maxGridUnitsForOtherAxis(config.grid_x)}
         sliderMax={MAX_GRID_UNITS}
         step={0.5}
         unit="u"
-        onChange={(v) =>
+        onChange={(v) => {
+          const width = gridSizingMode === 'fixed_depth'
+            ? Math.min(config.grid_x, maxGridUnitsForOtherAxis(v))
+            : config.grid_x
           update({
-              grid_y: v,
-              partial_bins_values: createPartialBinsValues(config.grid_x, v),
+            grid_x: width,
+            grid_y: v,
+            partial_bins_values: createPartialBinsValues(width, v),
           })
-        }
-        disabled={autoSize}
+        }}
+        disabled={gridSizingMode === 'auto'}
       />
 
       <SliderRow
@@ -235,20 +250,6 @@ export function BinConfigurator({ config, onChange, autoSize, onAutoSizeChange, 
           update({ height_units: v, cutout_depth: Math.min(Math.max(5, config.cutout_depth), newMax) })
         }}
       />
-
-      {fitHeight != null && onAutoFit && (
-        <div className="flex items-center justify-between py-1">
-          <span className="text-[10px] text-text-muted">Your tools fit at {fitHeight}u</span>
-          <button
-            type="button"
-            onClick={onAutoFit}
-            title="Set the smallest height that fits your tools and deepen the cutout so the bin stays stackable"
-            className="btn-secondary px-2 py-0.5 text-[10px]"
-          >
-            Auto-set
-          </button>
-        </div>
-      )}
 
       <SliderRow
         label="Cutout Depth"
@@ -455,68 +456,103 @@ export function BinConfigurator({ config, onChange, autoSize, onAutoSizeChange, 
   )
 }
 
-export function BinHeightPlanner({ binId, config, placedTools, onApply, onPlan }: {
+export function BinHeightPlanner({ binId, config, placedTools, onApply, onRemove }: {
   binId: string
   config: BinConfig
   placedTools: PlacedTool[]
   onApply: (proposal: HeightProposal) => Promise<void>
-  onPlan?: (planning: BinHeightPlanning | null) => void
+  onRemove: (id: string) => void
 }) {
-  const [gap, setGap] = useState(0)
-  const [planning, setPlanning] = useState<BinHeightPlanning | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const { theme } = useTheme()
+  const fitDescriptionId = useId()
+  const queryKey = ['bin-height-planning', binId, config, placedTools]
+  const inputKey = hashKey(queryKey)
+  const [settledInputKey, setSettledInputKey] = useState<string | null>(inputKey)
+  const debouncing = inputKey !== settledInputKey
+  const [applyError, setApplyError] = useState<string | null>(null)
   const [applying, setApplying] = useState(false)
-  const [revision, setRevision] = useState(0)
-  const onPlanRef = useRef(onPlan)
-  onPlanRef.current = onPlan
+  const { data: planning, error: assessmentError, fetchStatus, refetch } = useQuery({
+    queryKey,
+    queryFn: () => planBinHeight(binId, config, placedTools),
+    enabled: !debouncing,
+    retry: false,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: 'always',
+  })
   useEffect(() => {
-    const refresh = () => setRevision(value => value + 1)
+    setApplyError(null)
+    if (!debouncing) return
+    setSettledInputKey(null)
+    const timer = setTimeout(() => setSettledInputKey(inputKey), 200)
+    return () => clearTimeout(timer)
+  }, [inputKey, debouncing])
+  useEffect(() => {
+    const refresh = () => {
+      if (!debouncing) void refetch({ cancelRefetch: false })
+    }
     window.addEventListener('focus', refresh)
     return () => window.removeEventListener('focus', refresh)
-  }, [])
-  useEffect(() => {
-    let cancelled = false
-    setPlanning(null)
-    setError(null)
-    const timer = setTimeout(() => {
-      planBinHeight(binId, config, placedTools, gap).then(result => {
-        if (!cancelled) { setPlanning(result); onPlanRef.current?.(result) }
-      }).catch(err => { if (!cancelled) { setError(err instanceof Error ? err.message : 'Height assessment failed'); onPlanRef.current?.(null) } })
-    }, 200)
-    return () => { cancelled = true; clearTimeout(timer) }
-  }, [binId, config, placedTools, gap, revision])
+  }, [debouncing, refetch])
+
+  const updating = debouncing || fetchStatus !== 'idle'
+  const error = applyError ?? (assessmentError instanceof Error ? assessmentError.message : assessmentError ? 'Height assessment failed' : null)
+
+  const proposal = planning?.alternatives.find(option => option.strategy === 'deeper_pockets')
+  const canFit = !updating && !assessmentError && placedTools.length > 0 && proposal?.complete && proposal.bin_config && proposal.placed_tools
+  const fitReason = placedTools.length === 0 ? 'Add tools to fit the bin height'
+    : updating ? planning ? 'Updating tool fit before setting height' : 'Assessing tool fit'
+    : assessmentError ? 'Height assessment failed; refresh to verify tool fit'
+    : !planning ? 'Assessing tool fit'
+    : !proposal?.complete && planning.assessment.missing_tool_ids.length > 0 ? 'Measure every tool’s thickness before auto-setting height'
+    : proposal?.reason ?? 'Set the smallest bin height and pocket depths that fit all contained tools'
+
   return (
     <section className="glass rounded-[10px] p-3 text-[11px] text-text-secondary space-y-2" aria-label="Fit height to tools">
       <h3 className="font-semibold text-text-primary">Fit height to tools</h3>
-      <label className="block">Safety clearance (mm)
-        <input aria-label="Bin safety clearance (mm)" type="number" min="0" step="0.1" value={gap}
-          className="w-full bg-elevated border border-border rounded px-2 py-1"
-          onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v) && v >= 0) setGap(v) }} />
-      </label>
-      <p>Zero is not a manufacturing tolerance. Physical checks remain necessary.</p>
+      <ul className="space-y-2">
+        {placedTools.map(placed => {
+          const tool = planning?.assessment.envelopes.find(envelope => envelope.id === placed.id)
+          const thickness = tool?.thickness_mm
+          const invalid = tool && (!tool.seating_verified || (tool.clearance_mm !== null && tool.clearance_mm < -1e-7))
+          const unknown = !tool || thickness == null || tool.clearance_mm === null
+            || planning?.assessment.violations.some(violation => !violation.tool_id)
+          const status = invalid ? 'Does not fit' : unknown ? 'Fit unknown' : 'Fits'
+          const StatusIcon = invalid ? X : unknown ? CircleHelp : Check
+          const reason = tool && !tool.seating_verified ? 'Reposition the tool or enlarge the bin to seat it in its pocket'
+            : thickness == null ? 'Measure the tool’s thickness in its tool editor' : status
+          return (
+            <li key={placed.id} className="flex items-center gap-1">
+              <div className="flex-1 min-w-0">
+                <a className="block break-words text-text-primary hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" href={`/tools/${placed.tool_id}`}>{tool?.name ?? placed.name}</a>
+                <span className={cn('flex items-center gap-1 tabular-nums',
+                  invalid ? theme === 'dark' ? 'text-red-400' : 'text-red-700'
+                    : unknown ? theme === 'dark' ? 'text-amber-400' : 'text-amber-700'
+                    : theme === 'dark' ? 'text-green-400' : 'text-green-700')}
+                  title={reason} aria-label={status}>
+                  <StatusIcon className="w-3 h-3 shrink-0" aria-hidden="true" />
+                  {thickness == null ? '— mm · — u' : `${thickness} mm · ${Number((thickness / GF_HEIGHT_UNIT).toFixed(2))} u`}
+                </span>
+              </div>
+              <button type="button" aria-label={`Remove ${tool?.name ?? placed.name} from bin`}
+                title="Remove from bin" disabled={applying} onClick={() => onRemove(placed.id)}
+                className="w-7 h-7 shrink-0 flex items-center justify-center rounded text-text-secondary hover:text-text-primary hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50">
+                <X className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+      <button type="button" className="btn-secondary w-full px-2 py-1.5 disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+        disabled={!canFit || applying} title={fitReason} aria-describedby={fitDescriptionId}
+        onClick={async () => {
+          if (!canFit || !proposal || applying) return
+          setApplying(true)
+          try { await onApply(proposal) } catch (err) { setApplyError(err instanceof Error ? err.message : 'Could not set bin height') } finally { setApplying(false) }
+        }}>
+        {applying ? 'Setting height…' : updating && placedTools.length > 0 ? planning ? 'Updating fit…' : 'Checking fit…' : 'Auto-set bin height'}
+      </button>
+      <span id={fitDescriptionId} className="sr-only">{fitReason}</span>
       {error && <p role="alert">{error}</p>}
-      {!planning && !error && <p role="status">Assessing current geometry…</p>}
-      {planning && <>
-        <p role="status">Stackability: {planning.assessment.status}. Current clearance: {planning.assessment.clearance_mm?.toFixed(2) ?? 'unknown'} mm.</p>
-        <p>External height {planning.assessment.external_height_mm.toFixed(2)} mm; stacking increment {planning.assessment.stack_increment_mm.toFixed(2)} mm.</p>
-        {planning.assessment.envelopes.map(tool => <p key={tool.id}>
-          <a className="text-accent" href={`/tools/${tool.tool_id}`}>{tool.name}</a>: {!tool.seating_verified ? 'cannot establish pocket-floor seating' : tool.thickness_mm === null ? 'needs thickness measurement' : `${tool.thickness_mm} mm thick; effective cutout ${tool.effective_depth_mm?.toFixed(2) ?? 'unavailable'} mm; clearance ${tool.clearance_mm?.toFixed(2)} mm`}
-          {tool.tool_id === planning.assessment.limiting_tool_id ? ' (limiting tool)' : ''}
-        </p>)}
-        {planning.assessment.violations.map((violation, i) => <p key={i}>{violation.message}</p>)}
-        {planning.alternatives.map(proposal => <div key={proposal.strategy} className="border-t border-border pt-2 space-y-1">
-          <strong>{proposal.strategy === 'deeper_pockets' ? 'Deeper pockets / taller body' : 'Raised rim / existing pockets'}</strong>
-          {proposal.bin_config ? <>
-            <p>{proposal.complete ? 'Minimum for measured tools' : 'Incomplete: unknown tools prevent a complete minimum'}: body {proposal.bin_config.height_units}u, raised rim {proposal.bin_config.rim_units}u, cutout {proposal.bin_config.cutout_depth.toFixed(2)} mm, physical height {proposal.external_height_mm?.toFixed(2)} mm.</p>
-            <p>Stacking lip enabled; minimum clearance {proposal.clearance_mm?.toFixed(2) ?? 'unknown'} mm. Applying updates this shared bin, so every linked plan is reassessed.</p>
-            {proposal.override_changes?.map(change => <p key={change.id}>Cutout {change.id}: {change.from_mm} → {change.to_mm} mm (explicit override change)</p>)}
-            <button type="button" className="btn-secondary w-full px-2 py-1" disabled={applying} onClick={async () => {
-              setApplying(true)
-              try { await onApply(proposal) } catch (err) { setError(err instanceof Error ? err.message : 'Could not apply proposal') } finally { setApplying(false) }
-            }}>Apply {proposal.strategy === 'deeper_pockets' ? 'deeper pockets' : 'raised rim'}</button>
-          </> : <p>{proposal.reason}</p>}
-        </div>)}
-      </>}
     </section>
   )
 }

@@ -33,6 +33,27 @@ Select a tool to see a **Depth** field in the toolbar. Leave it blank to use the
 1. Click the **Text** tool in the floating toolbar.
 2. Click anywhere on the canvas to place a label. A text input appears.
 3. Type the label text and press Enter to confirm (Escape to cancel).
+## Undo and action history
+
+Use **Undo** and **Redo** in the sidebar, or **Ctrl/Cmd+Z** and
+**Ctrl/Cmd+Shift+Z** outside text fields. Expand **Action history** to see the
+recorded actions, the current state, and any undone actions.
+
+History includes adding and removing tools, moving and rotating placements,
+pinning, cutout-depth changes, text labels, bin configuration, grid-sizing mode,
+height plans and renaming. A drag is one action. Auto-arrange and its automatic
+grid changes are one action too: undo restores the previous dimensions, partial
+cell mask, tool outlines, rotations, finger holes and labels together.
+
+Restored changes are automatically saved and refresh the preview. A new edit
+after undo discards the redo branch. Undo also discards an in-flight auto-arrange,
+so its late result cannot overwrite the restored layout.
+
+History is limited to the latest 50 states in the current editor session; opening
+another bin or reloading clears it. Shared library smoothing settings and saved
+global defaults are not reverted. While typing, keyboard undo stays native to
+the field.
+
 4. Double-click an existing label to edit its text.
 
 When a label is selected, the toolbar shows:
@@ -43,24 +64,78 @@ When a label is selected, the toolbar shows:
 - **Emboss / Recess** toggle. Emboss raises the text above the surface; recess cuts it in.
 
 Labels can be dragged to reposition and have a rotation handle.
+## Pinning placements
 
-## Auto-size grid
+Position and rotate a tool, then select **Pin** in its toolbar. A **Pinned**
+badge marks the anchor on the canvas; **Unpin** releases it. Pins are saved with
+the bin and survive reloads. Pinning constrains automation only: you can still
+drag and rotate a pinned tool to adjust its anchor.
 
-Enabled by default. The grid automatically expands or contracts to fit all placed tools with clearance. Tools are recentred when the grid changes. Turn it off in the sidebar to set grid dimensions manually.
+Pins belong to individual placements, not library tools. If you add several
+copies of the same tool, pin or unpin each copy independently; auto-arrange
+moves only the unpinned copies and preserves every pinned copy's exact pose.
+
+**Auto-arrange** keeps every pinned outline, rotation, finger hole and interior
+ring in place and packs the remaining tools around those anchors. Tool padding
+applies to anchors too. Pins outside the usable interior or too close to another
+pin produce an actionable error without replacing the layout; move them, adjust
+the grid or padding, or unpin them before retrying.
+
+While any tool is pinned, **Recenter** is disabled and automatic grid sizing
+measures from the bin origin to the tools' far edges rather than translating the
+group. Tools near the right or bottom edges can therefore require a larger bin
+than their combined outline size suggests. **Fixed depth, auto width** still
+accepts the server's computed width without moving anchors or changing depth.
+Move tools inside the top and left usable edges if they cross those edges;
+automatic sizing cannot fix this by moving a pinned layout.
+
+Pinning, unpinning, dragging or rotating during an auto-arrange discards the
+pending result, so a late response cannot replace the updated placement.
+
+
+
+## Grid sizing
+
+Use **Grid sizing** in the sidebar. **Auto width and depth** (default) fits both dimensions to the placed tools and recentres them when there are no pins; pinned layouts keep their origin-relative positions. **Fixed width and depth** lets you set both dimensions manually.
+
+To choose only Y, select **Fixed depth, auto width**, set **Grid Depth**, then click **Auto-arrange**. The arranger keeps that depth and searches for a compact width; the width control displays the computed X. Manual tool edits also resize X without changing Y. A tool that exceeds the fixed depth is flagged rather than silently increasing it.
 
 ## Recentre
 
-Click **Recentre** in the toolbar to move all placed tools to the centre of the bin.
+Click **Recenter** in the toolbar to move all placed tools to the centre of the bin. Unpin tools first; recentering is disabled while any anchor is pinned.
 
 ## Auto-arrange
 
-Click **Auto-arrange** in the toolbar to pack the placed tools into an efficient layout. A spinner and a visible canvas status remain while the request is running. Progress is indeterminate: the server does not report individual packing steps or a completion percentage.
+Click **Auto-arrange** in the toolbar to pack the placed tools into an efficient layout. The canvas status shows a loading bar and estimated seconds remaining based on the compute budget submitted for that run. The bar measures estimated elapsed budget, not actual optimizer progress, packing steps, or solution quality; the server does not report a completion percentage. If the budget elapses before the response arrives, the spinner stays active and the status reads **Waiting for result…**; budget expiry does not declare the request finished.
+
+The default **Automatic** algorithm runs Raster and PackingSolver simultaneously
+in independent processes, retaining the best result validated against the
+original tool outlines: fitting more tools takes priority, then a more compact
+layout. The best valid result is retained when the compute budget expires. When
+every tool fits a fixed bin and there are no pins, the arranger centers the packed
+group within its usable interior; it leaves pinned, overflow and auto-sized layouts unchanged.
+
+In **Fixed depth, auto width**, fitting more tools still takes priority, then
+smaller occupied width rather than bounding-box area. The chosen width respects
+the 25u/100-cell limits, wall/stacking-lip inset and cutout fit clearance; fitted
+tools are centred in the resulting bin only when there are no pins. This is a bounded heuristic search, not
+proof of the smallest possible width.
+
+Open **Advanced** beside Auto-arrange to select **Automatic**, **Raster**, or
+**PackingSolver**, and set **Compute time (seconds)** from **0.5 to 60** (default
+**5**). This is one total budget covering worker startup, preparation, and search,
+not a separate allowance for each engine. More time can help the search find a
+better arrangement, but does not guarantee improvement or prove an optimum.
+The estimated countdown keeps that run's submitted budget even if you edit the setting while
+it runs. These choices last only for the current editor session. **Tool padding (mm)** remains outside
+Advanced and sets the minimum gap between outlines, separate from cutout fit
+clearance.
 
 If no fitting layout is found, the editor still applies the returned arrangement and shows a warning naming the affected tools, their count, and the grid dimensions requested for that run. Increase the grid size or remove tools, then try again. This is a packing result, not proof that no possible arrangement could fit.
 
 The warning describes the **last run**, not the current grid: auto-size may expand the grid immediately after the arrangement is applied. It remains until dismissed or another auto-arrange starts; a fitting rerun leaves no warning.
 
-A failed request keeps the existing tool layout and allows another attempt. Editing tools or bin settings while packing is running invalidates the pending result, so a late response cannot overwrite those changes.
+A failed request keeps the existing tool layout and allows another attempt. Editing tools, bin settings, tool padding, algorithm, or compute time while packing is running invalidates the pending result, so a late response cannot overwrite those changes. An empty, non-finite, or out-of-range compute-time draft disables Auto-arrange until corrected, without changing the existing layout.
 
 ## 3D preview
 
@@ -105,3 +180,5 @@ The sidebar controls all bin parameters:
 |-|-|
 | Escape | Deselect / cancel text input |
 | Enter | Confirm text input |
+| Ctrl/Cmd+Z | Undo the last bin action (outside editable fields) |
+| Ctrl/Cmd+Shift+Z | Redo an undone bin action (outside editable fields) |

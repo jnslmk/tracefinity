@@ -14,6 +14,8 @@ export const MIN_GRID_UNITS = 1
 export const MAX_GRID_UNITS = 25
 export const MAX_GRID_CELLS = 100
 
+export type GridSizingMode = 'auto' | 'fixed' | 'fixed_depth'
+
 export function gridCellCount(gridX: number, gridY: number): number {
   return Math.ceil(gridX) * Math.ceil(gridY)
 }

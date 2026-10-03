@@ -42,16 +42,42 @@ same physical maximum.
 
 **Retain outer wall** -- keeps the outer bin wall around the full perimeter when connect base is on.
 
-## Auto grid sizing
+## Grid sizing
 
-On by default. When enabled, grid width and depth automatically adjust to fit all placed tools, and the grid width/depth sliders are disabled. Toggle it off to set grid size manually; the sliders become active again.
+Choose **Grid sizing** in the bin sidebar:
+
+- **Auto width and depth** (default): both dimensions follow the placed tools; both sliders are disabled.
+- **Fixed width and depth**: set both dimensions manually.
+- **Fixed depth, auto width**: set **Grid Depth** (Y); **Grid Width** (X) follows the layout. Click **Auto-arrange** to pack tools within that depth and search for a smaller width. Width snaps to full units, or half units with a half-grid base.
+
+The sizing mode lasts for the current editor session; the resulting dimensions are saved. Fixed depth never grows automatically. If tools extend outside its usable interior, preview/export pause until you rearrange them or increase depth.
 
 Bins can be up to 25 units on either axis with a 100-cell grid footprint. Long, narrow bins are supported and are split according to the configured bed size. If an auto-sized layout exceeds either safety limit, Tracefinity keeps saving the tool placement but pauses preview and export until the tools are reduced or rearranged.
 
-Both manual grid sliders use a fixed 1–25u scale, so changing one dimension
-does not move the other slider's thumb. Each dimension stops at the largest
-value allowed by the 100-cell footprint (`ceil(width) × ceil(depth)`); the
-numeric input's maximum reflects that limit.
+The grid sliders use a fixed 1–25u scale, so changing one dimension does not
+move the other slider's thumb. Manual dimensions respect the 100-cell footprint
+(`ceil(width) × ceil(depth)`). In fixed-depth mode, choosing a deeper bin can
+reduce the computed width to stay within that limit.
+
+## Auto-arrange tool padding
+
+Use **Tool padding (mm)** beside **Auto-arrange** to choose the minimum
+edge-to-edge distance between raw tool outlines. The default is **1 mm**;
+**0 mm** allows outlines to touch without overlapping. Enter a finite,
+non-negative number; blank or invalid input shows an error and disables
+Auto-arrange rather than using another spacing.
+
+This is separate from **Clearance** in the bin configuration, which expands
+each pocket around its tool for fit. Tool padding does not guarantee a wall
+between the expanded cutouts: allow for both tools' fit clearance and the
+desired wall thickness when choosing padding. It does not add a bin-wall
+margin. Auto-arrange still packs inside the usable wall/stacking-lip interior
+and warns if it cannot find a fitting layout.
+
+Padding applies to the next Auto-arrange run, not manual moves or existing
+placements. It stays in the current editor session and is not saved in bin
+defaults. Changing padding while a run is pending discards that run's result;
+run Auto-arrange again to use the new value.
 
 ## Default bin settings
 
@@ -77,10 +103,17 @@ If the bin dimensions exceed your configured bed size or the bin model is separa
 ## Loaded-bin height planning
 
 Record each library tool's maximum **resting thickness in the scanned
-orientation** in its tool editor. Unknown measurements remain unknown, including
-old tools. The bin's **Fit height to tools** panel identifies the limiting tool,
-effective cutout depths, current upper-bin clearance, standalone exterior height
-and assembled stacking increment. These are different physical datums.
+orientation** in its tool editor. The bin's **Fit height to tools** panel lists
+each contained tool's height in millimetres and Gridfinity height units (7 mm
+per unit). Green/check means it fits, red/cross means it does not, and
+amber/question mark means fit is unknown. Missing measurements stay unknown.
+Use the **×** beside a tool to remove that placement from the bin without
+deleting the library tool.
+
+Previously computed measurements stay visible when you reopen the same draft or
+return to the window. The panel refreshes shared tool measurements in the
+background; auto-setting height stays unavailable until that refresh completes.
+Changing the bin configuration or placements requires a new fit assessment.
 
 Depth assessment uses the same generator rules: per-tool override before global
 cutout depth, insert allowance, the physical base/floor clamp and the normal 5 mm
@@ -93,22 +126,18 @@ Known insert interference is reported even while tool thickness is unknown.
 If the scanned outline cannot seat in the printed, clipped pocket, fix its position
 or bin footprint first; the planner does not propose a false floor-level fit.
 
-Inspect either alternative before applying it:
+**Auto-set bin height** chooses the smallest supported body height and adjusts
+pocket depths, including explicit per-tool overrides, to fit all contained
+tools. It enables the stacking lip and resets the raised rim to zero.
+The button is unavailable while checking fit, when measurements or pocket
+seating are unresolved, or when no supported height fits; its description
+explains why. There are no separate strategy or safety-clearance controls in
+this panel.
 
-- **Deeper pockets / taller body** chooses the smallest supported body height
-  that recesses measured tools enough. Any necessary increase to an explicit
-  per-tool override is shown before applying.
-- **Raised rim / existing pockets** retains body and pocket settings and chooses
-  the smallest supported rim that clears the measured tool envelopes.
-
-The panel shows proposed body/rim units, cutout settings, changed overrides,
-resulting physical height and clearance. **Apply** changes the existing
-configuration and follows normal auto-save and STL generation. Inspect save or
-generation errors before leaving. It does not silently change bins merely by
-opening the panel. Partial interfaces are not claimed to be stackable, and
-unsupported height/depth limits return an explanation rather than a fake fit.
-
-Missing measurements make known-tool proposals **incomplete**, not a complete
-minimum-height recommendation. The plan re-evaluates current measurements and
-configuration; a taller bin that becomes stackable can still interfere with the
-container lid. Set a practical safety gap, and test printed parts physically.
+Applying follows normal auto-save and STL generation and updates the shared bin
+in every linked plan. Inspect save or generation errors before leaving.
+Opening the panel does not apply a height change. A taller bin can still
+interfere with the container lid, so reassess linked drawer plans after changing
+it. Automatic fitting uses zero additional vertical safety clearance, not a
+manufacturing tolerance; check measured thicknesses and test printed parts
+physically. Drawer plans retain their own safety-clearance setting.

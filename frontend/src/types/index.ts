@@ -303,6 +303,7 @@ export interface ProjectHealthResponse {
 // --- bins ---
 
 export interface PlacedTool {
+  // Unique placement instance; repeated copies share tool_id, never id.
   id: string
   tool_id: string
   name: string
@@ -310,6 +311,7 @@ export interface PlacedTool {
   finger_holes: FingerHole[]
   interior_rings: Point[][]
   rotation: number
+  pinned?: boolean
   depth_override?: number | null
 }
 

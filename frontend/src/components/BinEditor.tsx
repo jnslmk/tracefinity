@@ -1,18 +1,19 @@
 'use client'
 
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useId } from 'react'
 import { AlertTriangle, LayoutGrid, LoaderCircle } from 'lucide-react'
 import type { PlacedTool, TextLabel } from '@/types'
 import { snapToGrid as snapToGridUtil } from '@/lib/svg'
 import { GRID_UNIT, DISPLAY_SCALE, SNAP_GRID } from '@/lib/constants'
+import type { GridSizingMode } from '@/lib/constants'
 import { BinEditorToolbar } from '@/components/BinEditorToolbar'
 import { BinEditorCanvas } from '@/components/BinEditorCanvas'
 
 interface Props {
   placedTools: PlacedTool[]
-  onPlacedToolsChange: (tools: PlacedTool[]) => void
+  onPlacedToolsChange: (tools: PlacedTool[], label?: string) => void
   textLabels: TextLabel[]
-  onTextLabelsChange: (labels: TextLabel[]) => void
+  onTextLabelsChange: (labels: TextLabel[], label?: string) => void
   gridX: number
   gridY: number
   partialBins: boolean
@@ -22,18 +23,23 @@ interface Props {
   defaultCutoutDepth: number
   maxCutoutDepth: number
   halfGridBase?: boolean
+  cutoutClearance?: number
+  gridSizingMode?: GridSizingMode
+  onAutoArrange?: (tools: PlacedTool[], gridX: number | null) => void
   onEditTool?: (toolId: string) => void
   smoothedToolIds?: Set<string>
   onToggleSmoothed?: (toolId: string, smoothed: boolean) => void
   smoothLevels?: Map<string, number>
   onSmoothLevelChange?: (toolId: string, level: number) => void
   onDraggingChange?: (dragging: boolean) => void
+  historyRevision?: number
 }
 
 type Tool = 'select' | 'text'
 
 interface AutoLayoutPlacement {
   tool_id: string
+  placement_id?: string
   name: string
   x: number
   y: number
@@ -45,6 +51,8 @@ interface AutoLayoutResult {
   bounds: [number, number, number, number]
   efficiency: number
   unfitted_tool_ids: string[]
+  unfitted_placement_ids?: string[]
+  grid_x: number | null
 }
 
 type Selection =
@@ -60,6 +68,35 @@ type DragState =
   | { type: 'rotate-label'; labelId: string; centerX: number; centerY: number; startAngle: number; origRotation: number }
   | null
 
+function ArrangeProgress({ timeBudget }: { timeBudget: number }) {
+  // ponytail: estimate from the submitted budget; no server step reporting.
+  const [budget] = useState(timeBudget)
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    const startedAt = performance.now()
+    const timer = setInterval(() => {
+      const seconds = Math.min(budget, (performance.now() - startedAt) / 1000)
+      setElapsed(seconds)
+      if (seconds >= budget) clearInterval(timer)
+    }, 250)
+    return () => clearInterval(timer)
+  }, [budget])
+
+  return (
+    <div className="mt-3" aria-live="off">
+      <progress
+        aria-label="Estimated compute time elapsed"
+        max={budget}
+        value={elapsed}
+        className="block h-1.5 w-full overflow-hidden rounded-full border-0 bg-glass-border appearance-none [&::-webkit-progress-bar]:bg-glass-border [&::-webkit-progress-value]:bg-accent [&::-moz-progress-bar]:bg-accent"
+      />
+      <p className="mt-1.5 text-xs text-text-secondary tabular-nums">
+        {elapsed < budget ? `Estimated: ~${Math.ceil(budget - elapsed)}s left` : 'Waiting for result…'}
+      </p>
+    </div>
+  )
+}
+
 export function BinEditor({
   placedTools,
   onPlacedToolsChange,
@@ -74,12 +111,16 @@ export function BinEditor({
   defaultCutoutDepth,
   maxCutoutDepth,
   halfGridBase,
+  cutoutClearance = 0,
+  gridSizingMode = 'fixed',
+  onAutoArrange,
   onEditTool,
   smoothedToolIds,
   onToggleSmoothed,
   smoothLevels,
   onSmoothLevelChange,
   onDraggingChange,
+  historyRevision = 0,
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null)
   const [selection, setSelection] = useState<Selection>(null)
@@ -88,18 +129,39 @@ export function BinEditor({
   const [snapEnabled, setSnapEnabled] = useState(false)
   const [snapGrid, setSnapGrid] = useState(SNAP_GRID)
   const [arranging, setArranging] = useState(false)
+  const [toolPadding, setToolPadding] = useState('1')
+  const paddingDescriptionId = useId()
+  const padding = Number(toolPadding)
+  const paddingValid = toolPadding.trim() !== '' && Number.isFinite(padding) && padding >= 0
+  const [arrangeAlgorithm, setArrangeAlgorithm] = useState('auto')
+  const [computeTime, setComputeTime] = useState('5')
+  const computeDescriptionId = useId()
+  const advancedSettingsId = useId()
+  const timeBudget = Number(computeTime)
+  const computeTimeValid = computeTime.trim() !== '' && Number.isFinite(timeBudget) && timeBudget >= 0.5 && timeBudget <= 60
   const [arrangeError, setArrangeError] = useState<string | null>(null)
   const [arrangeWarning, setArrangeWarning] = useState<{
     names: string[]; gridX: number; gridY: number
   } | null>(null)
   const arrangePendingRef = useRef(false)
   const arrangeInputVersion = useRef(0)
-  const arrangeConfig = JSON.stringify([gridX, gridY, wallThickness, stackingLip, partialBins, partialBinsValues, halfGridBase])
+  const arrangeAbortRef = useRef<AbortController | null>(null)
+  const arrangeConfig = JSON.stringify([gridX, gridY, wallThickness, stackingLip, partialBins, partialBinsValues, halfGridBase, cutoutClearance, gridSizingMode, toolPadding, arrangeAlgorithm, computeTime])
   useEffect(() => {
     arrangeInputVersion.current += 1
     setArrangeError(null)
     return () => { arrangeInputVersion.current += 1 }
-  }, [placedTools, arrangeConfig])
+  }, [placedTools, textLabels, arrangeConfig, historyRevision])
+  useEffect(() => {
+    arrangeAbortRef.current?.abort()
+    arrangeAbortRef.current = null
+    arrangePendingRef.current = false
+    setArranging(false)
+    setArrangeWarning(null)
+    setSelection(null)
+    setPendingLabel(null)
+    setEditingLabelId(null)
+  }, [historyRevision])
   const [pendingLabel, setPendingLabel] = useState<{ x: number; y: number } | null>(null)
   const [pendingText, setPendingText] = useState('')
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null)
@@ -120,6 +182,7 @@ export function BinEditor({
   useEffect(() => { onDraggingChange?.(dragging !== null) }, [dragging, onDraggingChange])
 
   const binWidthMm = gridX * GRID_UNIT
+  const hasPins = placedTools.some(tool => tool.pinned)
   const binHeightMm = gridY * GRID_UNIT
   const displayWidth = binWidthMm * DISPLAY_SCALE
   const displayHeight = binHeightMm * DISPLAY_SCALE
@@ -144,6 +207,8 @@ export function BinEditor({
   }, [placedTools])
 
   const handleRecenter = useCallback(() => {
+    if (hasPins) return
+    arrangeInputVersion.current += 1
     const bounds = getAllBounds()
     const targetCenterX = binWidthMm / 2
     const targetCenterY = binHeightMm / 2
@@ -160,12 +225,14 @@ export function BinEditor({
         ring.map(p => ({ x: p.x + dx, y: p.y + dy }))
       ),
     }))
-    onPlacedToolsChange(updated)
-  }, [getAllBounds, binWidthMm, binHeightMm, placedTools, onPlacedToolsChange])
+    onPlacedToolsChange(updated, 'Recenter tools')
+  }, [hasPins, getAllBounds, binWidthMm, binHeightMm, placedTools, onPlacedToolsChange])
 
   const handleAutoArrange = useCallback(async () => {
-    if (placedTools.length === 0 || arrangePendingRef.current) return
+    if (placedTools.length === 0 || dragging || arrangePendingRef.current || !paddingValid || !computeTimeValid) return
     arrangePendingRef.current = true
+    const controller = new AbortController()
+    arrangeAbortRef.current = controller
     const inputVersion = arrangeInputVersion.current
     setArranging(true)
     setArrangeError(null)
@@ -175,11 +242,27 @@ export function BinEditor({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
+        signal: controller.signal,
         body: JSON.stringify({
           tool_ids: placedTools.map(t => t.tool_id),
-          clearance: 1.0,
-          // partial config is enough: the backend derives the usable interior
-          bin_config: { grid_x: gridX, grid_y: gridY, wall_thickness: wallThickness, stacking_lip: stackingLip },
+          placement_ids: placedTools.map(t => t.id),
+          fixed_placements: placedTools.filter(tool => tool.pinned).map(tool => ({
+            tool_id: tool.tool_id,
+            placement_id: tool.id,
+            x: Math.min(...tool.points.map(point => point.x)),
+            y: Math.min(...tool.points.map(point => point.y)),
+            rotation: tool.rotation || 0,
+          })),
+          clearance: padding,
+          algorithm: arrangeAlgorithm,
+          time_budget_seconds: timeBudget,
+          auto_width: gridSizingMode === 'fixed_depth',
+          // The backend derives the usable interior from these geometry settings.
+          bin_config: {
+            grid_x: gridX, grid_y: gridY, wall_thickness: wallThickness,
+            stacking_lip: stackingLip, half_grid_base: halfGridBase,
+            cutout_clearance: cutoutClearance,
+          },
         }),
       })
       if (!res.ok) {
@@ -188,10 +271,12 @@ export function BinEditor({
       }
       const data: AutoLayoutResult = await res.json()
       if (inputVersion !== arrangeInputVersion.current) return
-      const placements = new Map(data.placements.map(p => [p.tool_id, p]))
+      const placements = new Map(data.placements.filter(p => p.placement_id !== undefined).map(p => [p.placement_id, p]))
+      const legacyPlacements = new Map(data.placements.filter(p => p.placement_id === undefined).map(p => [p.tool_id, p]))
 
       const updated = placedTools.map(tool => {
-        const placement = placements.get(tool.tool_id)
+        if (tool.pinned) return tool
+        const placement = placements.get(tool.id) ?? legacyPlacements.get(tool.tool_id)
         if (!placement || tool.points.length === 0) return tool
 
         // rotate about the tool centre to the placement's absolute rotation
@@ -231,24 +316,29 @@ export function BinEditor({
           }),
         }
       })
-      onPlacedToolsChange(updated)
-      if (data.unfitted_tool_ids.length > 0) {
-        const unfitted = new Set(data.unfitted_tool_ids)
+      const computedWidth = gridSizingMode === 'fixed_depth' ? data.grid_x : null
+      if (onAutoArrange) onAutoArrange(updated, computedWidth)
+      else onPlacedToolsChange(updated, 'Auto-arrange tools')
+      const unfitted = new Set(data.unfitted_placement_ids ?? data.unfitted_tool_ids)
+      if (unfitted.size > 0) {
         setArrangeWarning({
-          names: placedTools.filter(tool => unfitted.has(tool.tool_id)).map(tool => tool.name),
-          gridX,
+          names: placedTools.filter(tool => unfitted.has(data.unfitted_placement_ids !== undefined ? tool.id : tool.tool_id)).map(tool => tool.name),
+          gridX: computedWidth ?? gridX,
           gridY,
         })
       }
     } catch (err) {
-      if (inputVersion === arrangeInputVersion.current) {
+      if (!controller.signal.aborted && inputVersion === arrangeInputVersion.current) {
         setArrangeError(err instanceof Error ? err.message : 'Auto-arrange failed')
       }
     } finally {
-      arrangePendingRef.current = false
-      setArranging(false)
+      if (arrangeAbortRef.current === controller) {
+        arrangeAbortRef.current = null
+        arrangePendingRef.current = false
+        setArranging(false)
+      }
     }
-  }, [placedTools, onPlacedToolsChange, gridX, gridY, wallThickness, stackingLip])
+  }, [placedTools, dragging, onPlacedToolsChange, onAutoArrange, gridX, gridY, wallThickness, stackingLip, halfGridBase, cutoutClearance, gridSizingMode, padding, paddingValid, arrangeAlgorithm, timeBudget, computeTimeValid])
 
   const screenToMm = useCallback((clientX: number, clientY: number) => {
     if (!svgRef.current) return { x: 0, y: 0 }
@@ -276,6 +366,7 @@ export function BinEditor({
     const tool = placedTools.find(t => t.id === toolId)
     if (!tool) return
 
+    arrangeInputVersion.current += 1
     setSelection({ type: 'tool', toolId })
     const pos = screenToMm(e.clientX, e.clientY)
     setDragging({
@@ -296,6 +387,7 @@ export function BinEditor({
     e.stopPropagation()
     const tool = placedTools.find(t => t.id === toolId)
     if (!tool) return
+    arrangeInputVersion.current += 1
 
     const pos = screenToMm(e.clientX, e.clientY)
     const centerX = tool.points.reduce((sum, p) => sum + p.x, 0) / tool.points.length
@@ -355,9 +447,9 @@ export function BinEditor({
     if (trimmed) {
       onTextLabelsChange(textLabels.map(l =>
         l.id === editingLabelId ? { ...l, text: trimmed } : l
-      ))
+      ), 'Edit label text')
     } else {
-      onTextLabelsChange(textLabels.filter(l => l.id !== editingLabelId))
+      onTextLabelsChange(textLabels.filter(l => l.id !== editingLabelId), 'Remove label')
       setSelection(null)
     }
     setEditingLabelId(null)
@@ -397,6 +489,7 @@ export function BinEditor({
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!dragging) return
+    arrangeInputVersion.current += 1
     const clientX = e.clientX
     const clientY = e.clientY
 
@@ -433,7 +526,7 @@ export function BinEditor({
             ),
           }
         })
-        onChange(updated)
+        onChange(updated, 'Move tool')
       } else if (dragging.type === 'rotate') {
         const currentAngle = Math.atan2(pos.y - dragging.centerY, pos.x - dragging.centerX)
         const deltaAngle = currentAngle - dragging.startAngle
@@ -469,7 +562,7 @@ export function BinEditor({
             ),
           }
         })
-        onChange(updated)
+        onChange(updated, 'Rotate tool')
       } else if (dragging.type === 'label') {
         const dx = pos.x - dragging.startX
         const dy = pos.y - dragging.startY
@@ -483,7 +576,7 @@ export function BinEditor({
           if (l.id !== dragging.labelId) return l
           return { ...l, x: newX, y: newY }
         })
-        onLabelsChange(updated)
+        onLabelsChange(updated, 'Move label')
       } else if (dragging.type === 'rotate-label') {
         const currentAngle = Math.atan2(pos.y - dragging.centerY, pos.x - dragging.centerX)
         const deltaAngle = (currentAngle - dragging.startAngle) * (180 / Math.PI)
@@ -491,7 +584,7 @@ export function BinEditor({
           if (l.id !== dragging.labelId) return l
           return { ...l, rotation: (dragging.origRotation + deltaAngle) % 360 }
         })
-        onLabelsChange(updated)
+        onLabelsChange(updated, 'Rotate label')
       }
     })
   }, [dragging, screenToMm, snapToGrid, isInsideCutout])
@@ -517,13 +610,13 @@ export function BinEditor({
 
   const handleDeleteTool = () => {
     if (selection?.type !== 'tool') return
-    onPlacedToolsChange(placedTools.filter(t => t.id !== selection.toolId))
+    onPlacedToolsChange(placedTools.filter(t => t.id !== selection.toolId), 'Remove tool')
     setSelection(null)
   }
 
   const handleDeleteLabel = () => {
     if (selection?.type !== 'label') return
-    onTextLabelsChange(textLabels.filter(l => l.id !== selection.labelId))
+    onTextLabelsChange(textLabels.filter(l => l.id !== selection.labelId), 'Remove label')
     setSelection(null)
   }
 
@@ -543,7 +636,7 @@ export function BinEditor({
       emboss: true,
       depth: 0.5,
     }
-    onTextLabelsChange([...textLabels, newLabel])
+    onTextLabelsChange([...textLabels, newLabel], 'Add label')
     setSelection({ type: 'label', labelId: newLabel.id })
     setPendingLabel(null)
     setPendingText('')
@@ -591,13 +684,13 @@ export function BinEditor({
     onTextLabelsChange(textLabels.map(l => {
       if (l.id !== selection.labelId) return l
       return { ...l, ...updates }
-    }))
+    }), 'Change label settings')
   }
 
   const setCutoutDepthOverride = (toolId: string, depth: number | null) => {
     onPlacedToolsChange(placedTools.map(t =>
       t.id === toolId ? { ...t, depth_override: depth } : t
-    ))
+    ), 'Change cutout depth')
   }
 
   const setHoleDepthOverride = (toolId: string, holeId: string, depth: number | null) => {
@@ -609,7 +702,7 @@ export function BinEditor({
           fh.id === holeId ? { ...fh, depth_override: depth } : fh
         ),
       }
-    }))
+    }), 'Change finger-hole depth')
   }
 
   const handleHoleClick = (toolId: string, holeId: string, e: React.MouseEvent) => {
@@ -630,7 +723,7 @@ export function BinEditor({
   return (
     <div className="h-full w-full relative">
       {/* floating toolbar */}
-      <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 glass-toolbar px-1.5 py-1 flex items-center gap-0.5">
+      <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 glass-toolbar px-1.5 py-1 flex flex-wrap justify-center items-center gap-0.5 gap-y-1.5 w-max max-w-[calc(100%-1.5rem)]">
         <BinEditorToolbar
           activeTool={activeTool}
           setActiveTool={setActiveTool}
@@ -639,12 +732,20 @@ export function BinEditor({
           snapGrid={snapGrid}
           setSnapGrid={setSnapGrid}
           handleRecenter={handleRecenter}
+          recenterDisabled={hasPins}
           selectedTool={selectedTool ?? null}
           selectedLabel={selectedLabel ?? null}
           selectedHole={selectedHole ?? null}
           selectedHoleToolId={selection?.type === 'hole' ? selection.toolId : null}
           onEditTool={onEditTool}
           onRemoveTool={handleDeleteTool}
+          onTogglePinned={() => {
+            if (!selectedTool) return
+            arrangeInputVersion.current += 1
+            onPlacedToolsChange(placedTools.map(tool =>
+              tool.id === selectedTool.id ? { ...tool, pinned: !tool.pinned } : tool
+            ), selectedTool.pinned ? 'Unpin tool' : 'Pin tool')
+          }}
           onRemoveLabel={handleDeleteLabel}
           smoothedToolIds={smoothedToolIds}
           smoothLevels={smoothLevels}
@@ -659,9 +760,23 @@ export function BinEditor({
         {placedTools.length > 0 && (
           <>
             <div className="w-px h-4 bg-glass-border mx-1 flex-shrink-0" />
+            <label className="flex items-center gap-1.5 px-2 text-[11px] text-text-secondary whitespace-nowrap">
+              Tool padding (mm)
+              <input
+                type="number"
+                min={0}
+                step="any"
+                required
+                value={toolPadding}
+                onChange={event => setToolPadding(event.target.value)}
+                aria-invalid={!paddingValid}
+                aria-describedby={paddingDescriptionId}
+                className="w-16 min-w-0 rounded border border-glass-border bg-surface px-1.5 py-1 text-text-primary focus-visible:outline-2 focus-visible:outline-accent"
+              />
+            </label>
             <button
               onClick={handleAutoArrange}
-              disabled={arranging}
+              disabled={arranging || dragging !== null || !paddingValid || !computeTimeValid}
               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[7px] text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap text-text-muted hover:text-text-secondary hover:bg-[rgba(255,255,255,0.03)] disabled:text-text-primary disabled:cursor-wait disabled:hover:bg-transparent"
               title="Pack the placed tools into an efficient layout"
             >
@@ -670,17 +785,84 @@ export function BinEditor({
                 : <LayoutGrid aria-hidden="true" className="w-3.5 h-3.5" />}
               {arranging ? 'Arranging…' : 'Auto-arrange'}
             </button>
+            <button
+              type="button"
+              popoverTarget={advancedSettingsId}
+              className="px-2.5 py-1.5 rounded-[7px] text-[11px] font-medium text-text-secondary hover:bg-[rgba(255,255,255,0.03)] cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              Advanced
+            </button>
+            <div
+              id={advancedSettingsId}
+              popover="auto"
+              role="group"
+              aria-label="Advanced auto-arrange settings"
+              className="fixed top-3 bottom-auto left-1/2 right-auto -translate-x-1/2 m-0 w-[min(32rem,calc(100vw-1.5rem))] max-h-[calc(100dvh-1.5rem)] overflow-y-auto rounded-xl border border-glass-border bg-surface p-3 text-[11px] text-text-secondary shadow-lg"
+            >
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <p className="font-medium text-text-primary">Auto-arrange settings</p>
+                <button
+                  type="button"
+                  popoverTarget={advancedSettingsId}
+                  popoverTargetAction="hide"
+                  aria-label="Close advanced auto-arrange settings"
+                  className="rounded px-2 py-1 text-text-secondary hover:bg-[rgba(255,255,255,0.03)] cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
+                >
+                  Close
+                </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="flex flex-wrap items-center gap-1.5 max-w-full">
+                  Algorithm
+                  <select
+                    value={arrangeAlgorithm}
+                    onChange={event => setArrangeAlgorithm(event.target.value)}
+                    className="min-w-0 shrink-0 max-w-full rounded border border-glass-border bg-surface px-1.5 py-1 text-text-primary focus-visible:outline-2 focus-visible:outline-accent"
+                  >
+                    <option value="auto">Automatic</option>
+                    <option value="raster">Raster</option>
+                    <option value="packingsolver">PackingSolver</option>
+                  </select>
+                </label>
+                <label className="flex flex-wrap items-center gap-1.5 max-w-full">
+                  Compute time (seconds)
+                  <input
+                    type="number"
+                    min={0.5}
+                    max={60}
+                    step="any"
+                    required
+                    value={computeTime}
+                    onChange={event => setComputeTime(event.target.value)}
+                    aria-invalid={!computeTimeValid}
+                    aria-describedby={computeDescriptionId}
+                    className="w-16 min-w-0 shrink-0 rounded border border-glass-border bg-surface px-1.5 py-1 text-text-primary focus-visible:outline-2 focus-visible:outline-accent"
+                  />
+                </label>
+                <p id={computeDescriptionId} className="basis-full text-xs text-text-primary" role={computeTimeValid ? undefined : 'alert'}>
+                  {computeTimeValid
+                    ? '0.5–60 seconds total. More time can help, but does not guarantee a better fit.'
+                    : 'Enter a finite compute time from 0.5 to 60 seconds.'}
+                </p>
+              </div>
+            </div>
+            <p id={paddingDescriptionId} className={paddingValid ? 'sr-only' : 'basis-full px-2 py-1 text-xs text-text-primary'} role={paddingValid ? undefined : 'alert'}>
+              {paddingValid
+                ? 'Minimum edge-to-edge gap between tool outlines, separate from cutout fit clearance.'
+                : 'Enter a finite number of 0 or more for tool padding in millimetres.'}
+            </p>
           </>
         )}
       </div>
       {(arranging || arrangeError || arrangeWarning) && (
-        <div className="absolute top-24 left-3 right-3 z-20 flex justify-center pointer-events-none">
+        <div className="fixed bottom-3 left-3 right-3 sm:absolute sm:top-24 sm:bottom-auto z-30 sm:z-20 flex justify-center pointer-events-none">
           {arranging ? (
-            <div role="status" className="flex items-start gap-3 rounded-xl border border-glass-border bg-surface px-4 py-3 shadow-lg max-w-md text-text-primary">
+            <div role="status" className="flex items-start gap-2 sm:gap-3 rounded-xl border border-glass-border bg-surface px-3 sm:px-4 py-3 shadow-lg w-full max-w-md text-text-primary">
               <LoaderCircle aria-hidden="true" className="w-5 h-5 shrink-0 text-accent motion-safe:animate-spin" />
-              <div>
+              <div className="min-w-0 flex-1 break-words">
                 <p className="text-sm font-medium">Arranging tools…</p>
-                <p className="text-xs text-text-secondary mt-1">Finding an efficient layout for {placedTools.length} {placedTools.length === 1 ? 'tool' : 'tools'}. This may take a moment.</p>
+                <p className="text-xs text-text-secondary mt-1">Finding an efficient layout for {placedTools.length} {placedTools.length === 1 ? 'tool' : 'tools'}.</p>
+                <ArrangeProgress timeBudget={timeBudget} />
               </div>
             </div>
           ) : arrangeError ? (

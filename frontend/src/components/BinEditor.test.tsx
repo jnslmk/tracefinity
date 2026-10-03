@@ -5,6 +5,7 @@ import { useState } from 'react'
 import type { PlacedTool } from '@/types'
 import { BinEditor } from './BinEditor'
 import { SNAP_GRID } from '@/lib/constants'
+import type { GridSizingMode } from '@/lib/constants'
 
 const baseProps = {
   placedTools: [],
@@ -51,17 +52,25 @@ const tool: PlacedTool = {
 function pendingResponse() {
   let resolve!: (response: Response) => void
   const promise = new Promise<Response>(done => { resolve = done })
-  const fetchMock = vi.fn(() => promise)
+  const fetchMock = vi.fn<typeof fetch>(() => promise)
   vi.stubGlobal('fetch', fetchMock)
   return {
     fetchMock,
-    finish: async (unfitted: string[] = [], ok = true) => {
+    finish: async (
+      unfitted: string[] = [], ok = true, gridX: number | null = null,
+      placements: { tool_id: string; placement_id?: string; name: string; x: number; y: number; rotation: number }[] = [
+        { tool_id: tool.tool_id, name: tool.name, x: 2, y: 3, rotation: 90 },
+      ],
+      unfittedPlacementIds?: string[],
+    ) => {
       await act(async () => {
         resolve({
           ok,
           json: async () => ok ? {
-            placements: [{ tool_id: tool.tool_id, name: tool.name, x: 2, y: 3, rotation: 90 }],
+            placements,
             bounds: [2, 3, 12, 23], efficiency: 1, unfitted_tool_ids: unfitted,
+            unfitted_placement_ids: unfittedPlacementIds,
+            grid_x: gridX,
           } : { detail: 'Packing service unavailable' },
         } as Response)
       })
@@ -70,7 +79,40 @@ function pendingResponse() {
 }
 
 describe('BinEditor auto-arrange feedback', () => {
-  afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+  afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals() })
+
+  it('counts down the submitted budget without treating its expiry as completion and resets on retry', async () => {
+    vi.useFakeTimers()
+    const onChange = vi.fn()
+    const request = pendingResponse()
+    render(<BinEditor {...baseProps} placedTools={[tool]} onPlacedToolsChange={onChange} />)
+    fireEvent.click(screen.getByText('Advanced'))
+    const budget = screen.getByLabelText('Compute time (seconds)')
+    fireEvent.change(budget, { target: { value: '2' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    const progress = screen.getByRole('progressbar', { name: 'Estimated compute time elapsed' }) as HTMLProgressElement
+    expect(progress.max).toBe(2)
+    expect(progress.value).toBe(0)
+    act(() => { vi.advanceTimersByTime(1000) })
+    expect(progress.value).toBe(1)
+    fireEvent.change(budget, { target: { value: '10' } })
+    act(() => { vi.advanceTimersByTime(5000) })
+    expect(progress.value).toBe(2)
+    expect(progress.max).toBe(2)
+    expect(screen.getByRole('button', { name: 'Arranging…' }).hasAttribute('disabled')).toBe(true)
+    expect(onChange).not.toHaveBeenCalled()
+    await request.finish()
+    expect(screen.queryByRole('progressbar')).toBeNull()
+    const retry = pendingResponse()
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    const fresh = screen.getByRole('progressbar') as HTMLProgressElement
+    expect(fresh.max).toBe(10)
+    expect(fresh.value).toBe(0)
+    await retry.finish([], false)
+    expect(screen.queryByRole('progressbar')).toBeNull()
+    expect(screen.getByRole('alert')).toBeTruthy()
+    expect(vi.getTimerCount()).toBe(0)
+  })
 
   it('shows pending work, applies overflow safely, and clears the last-run warning on a fitting rerun', async () => {
     function Editor({ gridX = 2 }: { gridX?: number }) {
@@ -80,7 +122,7 @@ describe('BinEditor auto-arrange feedback', () => {
     const request = pendingResponse()
     const { rerender } = render(<Editor />)
     fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
-    expect(screen.getByRole('status').textContent).toContain('Finding an efficient layout')
+    expect(screen.getByRole('status')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Arranging…' }).hasAttribute('disabled')).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: 'Arranging…' }))
     expect(request.fetchMock).toHaveBeenCalledTimes(1)
@@ -112,6 +154,97 @@ describe('BinEditor auto-arrange feedback', () => {
     expect(screen.getByRole('button', { name: 'Auto-arrange' }).hasAttribute('disabled')).toBe(false)
   })
 
+  it.each(['', '-1', '1e309'])('keeps the layout and blocks invalid padding %j until corrected', async value => {
+    const onChange = vi.fn()
+    const request = pendingResponse()
+    render(<BinEditor {...baseProps} placedTools={[tool]} onPlacedToolsChange={onChange} />)
+    const padding = screen.getByRole('spinbutton', { name: 'Tool padding (mm)' })
+    fireEvent.change(padding, { target: { value } })
+    expect(padding.getAttribute('aria-invalid')).toBe('true')
+    expect(screen.getByRole('alert').textContent).toContain('Enter a finite number of 0 or more')
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    expect(request.fetchMock).not.toHaveBeenCalled()
+    expect(onChange).not.toHaveBeenCalled()
+
+    fireEvent.change(padding, { target: { value: '0' } })
+    expect(screen.queryByRole('alert')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    await request.finish()
+    expect(onChange.mock.calls[0][0][0].points[0]).toEqual({ x: 12, y: 3 })
+    expect(JSON.parse(String(request.fetchMock.mock.calls[0][1]?.body)).clearance).toBe(0)
+  })
+
+  it.each([true, false])('discards a stale padding result (success: %s) and applies a fresh run', async ok => {
+    const onChange = vi.fn()
+    const stale = pendingResponse()
+    render(<BinEditor {...baseProps} placedTools={[tool]} onPlacedToolsChange={onChange} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Tool padding (mm)' }), { target: { value: '4.5' } })
+    await stale.finish([tool.tool_id], ok)
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+
+    const fresh = pendingResponse()
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    await fresh.finish()
+    expect(onChange.mock.calls[0][0][0].rotation).toBe(90)
+    expect(JSON.parse(String(fresh.fetchMock.mock.calls[0][1]?.body)).clearance).toBe(4.5)
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it.each(['', '0.49', '60.01', '1e309'])('keeps the layout and blocks invalid compute time %j until corrected', async value => {
+    const onChange = vi.fn()
+    const request = pendingResponse()
+    render(<BinEditor {...baseProps} placedTools={[tool]} onPlacedToolsChange={onChange} />)
+    // jsdom does not activate native popovers; exercise draft state via its label.
+    const budget = screen.getByLabelText('Compute time (seconds)')
+    fireEvent.change(budget, { target: { value } })
+    expect(budget.getAttribute('aria-invalid')).toBe('true')
+    expect(screen.getByRole('button', { name: 'Auto-arrange' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByRole('alert', { hidden: true })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    expect(request.fetchMock).not.toHaveBeenCalled()
+    expect(onChange).not.toHaveBeenCalled()
+
+    fireEvent.change(budget, { target: { value: '0.5' } })
+    expect(screen.queryByRole('alert', { hidden: true })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    await request.finish()
+    expect(onChange.mock.calls[0][0][0].points[0]).toEqual({ x: 12, y: 3 })
+  })
+
+  it.each([
+    ['Algorithm', 'raster', true],
+    ['Algorithm', 'packingsolver', false],
+    ['Compute time (seconds)', '60', true],
+    ['Compute time (seconds)', '', false],
+  ] as const)('discards pending results after changing %s to %j (success: %s)', async (label, value, ok) => {
+    const onChange = vi.fn()
+    const stale = pendingResponse()
+    render(<BinEditor {...baseProps} placedTools={[tool]} onPlacedToolsChange={onChange} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    const control = screen.getByLabelText(label)
+    fireEvent.change(control, { target: { value } })
+    await stale.finish([tool.tool_id], ok)
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.queryByText(/Packing service unavailable/)).toBeNull()
+    if (value === '') {
+      expect(screen.getByRole('alert', { hidden: true })).toBeTruthy()
+      expect(control.getAttribute('aria-invalid')).toBe('true')
+    } else {
+      expect(screen.queryByRole('alert', { hidden: true })).toBeNull()
+    }
+
+    if (value === '') fireEvent.change(control, { target: { value: '5' } })
+    const fresh = pendingResponse()
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    await fresh.finish()
+    expect(onChange.mock.calls[0][0][0].rotation).toBe(90)
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
   it.each(['grid', 'layout'])('discards late results after the %s changes', async change => {
     const onChange = vi.fn()
     const request = pendingResponse()
@@ -140,5 +273,210 @@ describe('BinEditor auto-arrange feedback', () => {
     expect(arranged.finger_holes[0].y).toBeCloseTo(8)
     expect(arranged.interior_rings[0][0].x).toBeCloseTo(10)
     expect(arranged.interior_rings[0][0].y).toBeCloseTo(5)
+  })
+
+  it('keeps pinned geometry intact while packing other tools and accepting fixed-depth width', async () => {
+    const anchor: PlacedTool = { ...tool, id: 'anchor', tool_id: 'anchor-library', name: 'Anchor', pinned: true, rotation: 37 }
+    const onArrange = vi.fn()
+    const request = pendingResponse()
+    render(<BinEditor {...baseProps} placedTools={[anchor, tool]} gridSizingMode="fixed_depth" onAutoArrange={onArrange} />)
+    expect(screen.getByRole('img', { name: 'Anchor: pinned for auto-arrange' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Recenter' }).hasAttribute('disabled')).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    const body = JSON.parse(request.fetchMock.mock.calls[0][1]!.body as string)
+    expect(body.fixed_placements).toEqual([{ tool_id: 'anchor-library', placement_id: 'anchor', x: 10, y: 10, rotation: 37 }])
+    await request.finish([], true, 4.5, [
+      { tool_id: anchor.tool_id, name: anchor.name, x: 40, y: 50, rotation: 0 },
+      { tool_id: tool.tool_id, name: tool.name, x: 2, y: 3, rotation: 90 },
+    ])
+    const [updated, width] = onArrange.mock.calls[0]
+    expect(width).toBe(4.5)
+    expect(updated[0]).toBe(anchor)
+    expect(updated[0].points).toBe(anchor.points)
+    expect(updated[0].finger_holes).toBe(anchor.finger_holes)
+    expect(updated[0].interior_rings).toBe(anchor.interior_rings)
+    expect(updated[1].rotation).toBe(90)
+    expect(updated[1].points[0]).toEqual({ x: 12, y: 3 })
+  })
+
+  it('pins repeated library copies independently and arranges only the released instance', async () => {
+    const first = { ...tool, id: 'first-copy' }
+    const second = {
+      ...tool, id: 'second-copy',
+      points: tool.points.map(point => ({ x: point.x + 25, y: point.y })),
+      finger_holes: tool.finger_holes.map(hole => ({ ...hole, x: hole.x + 25 })),
+      interior_rings: tool.interior_rings.map(ring => ring.map(point => ({ x: point.x + 25, y: point.y }))),
+    }
+    const third = { ...tool, id: 'third-tool', tool_id: 'other-library', name: 'Hammer' }
+    const changed = vi.fn()
+    function Editor() {
+      const [tools, setTools] = useState([first, second, third])
+      const update = (next: PlacedTool[]) => { changed(next); setTools(next) }
+      return <BinEditor {...baseProps} placedTools={tools} onPlacedToolsChange={update} onAutoArrange={update} />
+    }
+    const request = pendingResponse()
+    const { container } = render(<Editor />)
+    const select = (index: number) => {
+      fireEvent.mouseDown(container.querySelectorAll('path.cursor-move')[index])
+      fireEvent.mouseUp(window)
+    }
+    select(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Pin' }))
+    select(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Pin' }))
+    expect(changed.mock.lastCall![0].map((copy: PlacedTool) => !!copy.pinned)).toEqual([true, true, false])
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    const pinnedBody = JSON.parse(request.fetchMock.mock.calls[0][1]!.body as string)
+    expect(pinnedBody.placement_ids).toEqual(['first-copy', 'second-copy', 'third-tool'])
+    expect(pinnedBody.fixed_placements.map((pin: { placement_id: string }) => pin.placement_id)).toEqual(['first-copy', 'second-copy'])
+    await request.finish([], true, null, [
+      { tool_id: third.tool_id, placement_id: third.id, name: third.name, x: 40, y: 30, rotation: 0 },
+    ])
+    const bothPinned = changed.mock.lastCall![0]
+    expect(bothPinned[0].points).toBe(first.points)
+    expect(bothPinned[1].points).toBe(second.points)
+    expect(bothPinned[2].points[0]).toEqual({ x: 40, y: 30 })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unpin' }))
+    const before = changed.mock.lastCall![0]
+    expect(before.map((copy: PlacedTool) => !!copy.pinned)).toEqual([true, false, false])
+    const released = pendingResponse()
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    const releasedBody = JSON.parse(released.fetchMock.mock.calls[0][1]!.body as string)
+    expect(releasedBody.fixed_placements).toEqual([
+      { tool_id: tool.tool_id, placement_id: first.id, x: 10, y: 10, rotation: 0 },
+    ])
+    await released.finish([], true, null, [
+      { tool_id: tool.tool_id, placement_id: second.id, name: tool.name, x: 2, y: 3, rotation: 90 },
+      { tool_id: third.tool_id, placement_id: third.id, name: third.name, x: 45, y: 35, rotation: 0 },
+      { tool_id: tool.tool_id, placement_id: first.id, name: tool.name, x: 60, y: 60, rotation: 180 },
+    ])
+    const arranged = changed.mock.lastCall![0]
+    expect(arranged[0]).toBe(before[0])
+    expect(arranged[1].rotation).toBe(90)
+    expect(arranged[1].points[0]).toEqual({ x: 12, y: 3 })
+    expect(arranged[1].finger_holes[0]).toMatchObject({ x: 7, y: 8 })
+    expect(arranged[1].interior_rings[0][0]).toEqual({ x: 10, y: 5 })
+    expect(arranged[2].points[0]).toEqual({ x: 45, y: 35 })
+  })
+
+  it('reports only the unfitted instance when another copy of its library tool fits', async () => {
+    const copy = { ...tool, id: 'unfitted-copy', name: 'Spare wrench' }
+    const onArrange = vi.fn()
+    const request = pendingResponse()
+    render(<BinEditor {...baseProps} placedTools={[tool, copy]} onAutoArrange={onArrange} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    await request.finish([tool.tool_id], true, null, [
+      { tool_id: tool.tool_id, placement_id: tool.id, name: tool.name, x: 2, y: 3, rotation: 90 },
+      { tool_id: copy.tool_id, placement_id: copy.id, name: copy.name, x: 90, y: 3, rotation: 0 },
+    ], [copy.id])
+    const updated = onArrange.mock.calls[0][0]
+    expect(updated[0].rotation).toBe(90)
+    expect(updated[1].points[0]).toEqual({ x: 90, y: 3 })
+    expect(screen.getByRole('status').textContent).toContain('1 tool')
+    expect(screen.getByRole('status').textContent).toContain('Spare wrench')
+    expect(screen.getByRole('status').textContent).not.toContain('Wrench')
+  })
+
+  it('pin and unpin toggles invalidate an arrangement that was already pending', async () => {
+    const onArrange = vi.fn()
+    function Editor() {
+      const [tools, setTools] = useState([tool])
+      return <BinEditor {...baseProps} placedTools={tools} onPlacedToolsChange={setTools} onAutoArrange={onArrange} />
+    }
+    const request = pendingResponse()
+    const { container } = render(<Editor />)
+    fireEvent.mouseDown(container.querySelector('path.cursor-move')!)
+    fireEvent.mouseUp(window)
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Pin' }))
+    expect(screen.getByRole('button', { name: 'Unpin' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('img', { name: 'Wrench: pinned for auto-arrange' })).toBeTruthy()
+    await request.finish()
+    expect(onArrange).not.toHaveBeenCalled()
+    const next = pendingResponse()
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Unpin' }))
+    await next.finish()
+    expect(onArrange).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Pin' }).getAttribute('aria-pressed')).toBe('false')
+    expect(screen.queryByRole('img', { name: 'Wrench: pinned for auto-arrange' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Recenter' }).hasAttribute('disabled')).toBe(false)
+  })
+
+  it('allows pinned tools to be dragged and rotated and rejects a result during a pending drag frame', async () => {
+    const onArrange = vi.fn()
+    let frame!: FrameRequestCallback
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => { frame = callback; return 1 }))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    const onChange = vi.fn()
+    function Editor() {
+      const [tools, setTools] = useState<PlacedTool[]>([{ ...tool, pinned: true }])
+      return <BinEditor {...baseProps} placedTools={tools} onPlacedToolsChange={updated => { onChange(updated); setTools(updated) }} onAutoArrange={onArrange} />
+    }
+    const request = pendingResponse()
+    const { container } = render(<Editor />)
+    const svg = screen.getByTestId('bin-canvas')
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 742, height: 702 } as DOMRect)
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    fireEvent.mouseDown(container.querySelector('path.cursor-move')!, { clientX: 90, clientY: 90 })
+    fireEvent.mouseMove(window, { clientX: 170, clientY: 130 })
+    await request.finish()
+    expect(onArrange).not.toHaveBeenCalled()
+    act(() => frame(0))
+    fireEvent.mouseUp(window)
+    const dragged = onChange.mock.calls[0][0][0]
+    expect(dragged.pinned).toBe(true)
+    expect(dragged.points[0]).toEqual({ x: 20, y: 15 })
+    expect(dragged.finger_holes[0]).toMatchObject({ x: 25, y: 20 })
+    expect(dragged.interior_rings[0][0]).toEqual({ x: 22, y: 17 })
+    // Rotate 90 degrees about the translated centroid (30, 20).
+    fireEvent.mouseDown(container.querySelector('rect.cursor-rotate')!, { clientX: 330, clientY: 170 })
+    fireEvent.mouseMove(window, { clientX: 250, clientY: 250 })
+    act(() => frame(0))
+    fireEvent.mouseUp(window)
+    const rotated = onChange.mock.calls[1][0][0]
+    expect(rotated.pinned).toBe(true)
+    expect(rotated.rotation).toBeCloseTo(90)
+    expect(rotated.points[0].x).toBeCloseTo(35)
+    expect(rotated.points[0].y).toBeCloseTo(10)
+  })
+
+  it('applies the computed width with packed geometry and reports overflow against that width', async () => {
+    function Editor() {
+      const [tools, setTools] = useState([tool])
+      const [gridX, setGridX] = useState(2)
+      return <>
+        <output aria-label="Grid dimensions">{gridX} × 2</output>
+        <BinEditor {...baseProps} placedTools={tools} gridX={gridX} gridSizingMode="fixed_depth"
+          halfGridBase stackingLip cutoutClearance={0.7}
+          onAutoArrange={(updated, width) => { setTools(updated); setGridX(width!) }} />
+      </>
+    }
+    const request = pendingResponse()
+    render(<Editor />)
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    await request.finish([tool.tool_id], true, 4.5)
+    expect(screen.getByLabelText('Grid dimensions').textContent).toBe('4.5 × 2')
+    const warning = screen.getByRole('status', { name: '' })
+    expect(warning.textContent).toContain('4.5 × 2')
+    expect(warning.textContent).toContain(tool.name)
+  })
+
+  it.each([
+    ['mode', true], ['depth', true], ['mode', false], ['depth', false],
+  ] as const)('rejects a pending auto-width result when %s changes (success: %s)', async (change, ok) => {
+    const onArrange = vi.fn()
+    const request = pendingResponse()
+    const tools = [tool]
+    const { rerender } = render(<BinEditor {...baseProps} placedTools={tools}
+      gridSizingMode="fixed_depth" onAutoArrange={onArrange} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+    rerender(<BinEditor {...baseProps} placedTools={tools} gridY={change === 'depth' ? 3 : 2}
+      gridSizingMode={(change === 'mode' ? 'fixed' : 'fixed_depth') as GridSizingMode} onAutoArrange={onArrange} />)
+    await request.finish([tool.tool_id], ok, 4)
+    expect(onArrange).not.toHaveBeenCalled()
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })
