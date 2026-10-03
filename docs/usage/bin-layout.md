@@ -10,29 +10,29 @@ The 2D canvas shows the 42mm Gridfinity grid over both the bin floor and tool
 outlines. Grid lines stay visible when zoomed out and do not block tool selection
 or dragging. Half-grid bases also show lighter, dashed 21mm subdivisions.
 
+### Project space
+
+For a bin linked to a project, **Project space** below the bin dimensions shows
+the available width, depth and usable height for every drawer plan. Physical
+millimetre limits take precedence over grid dimensions.
+
+Occupancy covers the whole saved drawer plan, including other bins and repeated
+placements, not just the bin being edited. Supported stacks share their root
+footprint rather than counting each member again. **Floor used** is the occupied
+floor grid area inside the drawer divided by its physical area; **Free grid**
+excludes residual edge strips. The placement count and an explicit note identify
+bins that are not yet included in a plan.
+
+Fit is green for **Fits**, red for **Does not fit**, and amber for incomplete
+measurements or unavailable assessments. Expand the fit issues for details.
+An occupancy percentage alone does not guarantee fit: bounds, collisions,
+tool thickness and loaded height also matter. Bin edits refresh the assessment
+after saving; pending edits never display an old result as a current fit.
+
 ## Adding tools
 
 The tool library strip shows all available tools (filtered to the current project if you arrived from one). Click a tool to add it to the bin. It is automatically centred, and the grid expands if needed.
 
-## Selecting and moving tools
-
-Click a placed tool to select it. Drag to reposition. The toolbar updates to show options for the selected tool.
-
-Snap is off by default (5mm grid when enabled). Toggle it with the **Snap** button in the floating toolbar.
-
-## Rotating tools
-
-When a tool is selected, a rotation handle appears. Drag it to rotate freely.
-
-## Per-tool cutout depth
-
-Select a tool to see a **Depth** field in the toolbar. Leave it blank to use the bin's default cutout depth. Enter a value to override it for that tool only. Click the reset button to clear the override.
-
-## Text labels
-
-1. Click the **Text** tool in the floating toolbar.
-2. Click anywhere on the canvas to place a label. A text input appears.
-3. Type the label text and press Enter to confirm (Escape to cancel).
 ## Undo and action history
 
 Use **Undo** and **Redo** in the sidebar, or **Ctrl/Cmd+Z** and
@@ -54,16 +54,16 @@ another bin or reloading clears it. Shared library smoothing settings and saved
 global defaults are not reverted. While typing, keyboard undo stays native to
 the field.
 
-4. Double-click an existing label to edit its text.
+## Selecting and moving tools
 
-When a label is selected, the toolbar shows:
+Click a placed tool to select it. Drag to reposition. The toolbar updates to show options for the selected tool.
 
-- **Text** field to edit the content.
-- **Size** to set the font size in mm.
-- **Depth** to set how deep the text is cut or raised, in mm.
-- **Emboss / Recess** toggle. Emboss raises the text above the surface; recess cuts it in.
+Snap is off by default (5mm grid when enabled). Toggle it with the **Snap** button in the floating toolbar.
 
-Labels can be dragged to reposition and have a rotation handle.
+## Rotating tools
+
+When a tool is selected, a rotation handle appears. Drag it to rotate freely.
+
 ## Pinning placements
 
 Position and rotate a tool, then select **Pin** in its toolbar. A **Pinned**
@@ -93,6 +93,25 @@ Pinning, unpinning, dragging or rotating during an auto-arrange discards the
 pending result, so a late response cannot replace the updated placement.
 
 
+## Per-tool cutout depth
+
+Select a tool to see a **Depth** field in the toolbar. Leave it blank to use the bin's default cutout depth. Enter a value to override it for that tool only. Click the reset button to clear the override.
+
+## Text labels
+
+1. Click the **Text** tool in the floating toolbar.
+2. Click anywhere on the canvas to place a label. A text input appears.
+3. Type the label text and press Enter to confirm (Escape to cancel).
+4. Double-click an existing label to edit its text.
+
+When a label is selected, the toolbar shows:
+
+- **Text** field to edit the content.
+- **Size** to set the font size in mm.
+- **Depth** to set how deep the text is cut or raised, in mm.
+- **Emboss / Recess** toggle. Emboss raises the text above the surface; recess cuts it in.
+
+Labels can be dragged to reposition and have a rotation handle.
 
 ## Grid sizing
 

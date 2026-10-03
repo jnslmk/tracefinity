@@ -7,6 +7,7 @@ import { BinConfigurator, BinHeightPlanner, calcMaxCutoutDepth } from '@/compone
 import { BinPreview3D } from '@/components/BinPreview3D'
 import { ImportedBinView } from '@/components/ImportedBinView'
 import { ToolBrowser } from '@/components/ToolBrowser'
+import { ProjectSpaceUsage } from '@/components/ProjectSpaceUsage'
 import { getBin, updateBin, generateBinStl, getBinStlUrl, getBinZipUrl, getBinThreemfUrl, getBinInsertUrl, getImageUrl, listTools, updateTool } from '@/lib/api'
 import { buildBinConfig, createPartialBinsValues, getDefaultBinConfig, resetDefaultBinConfig, saveDefaultBinConfig } from '@/lib/binDefaults'
 import { downloadExport } from '@/lib/download'
@@ -49,6 +50,8 @@ export default function BinPage() {
   const [placedTools, setPlacedTools] = useState<PlacedTool[]>([])
   const [textLabels, setTextLabels] = useState<TextLabel[]>([])
   const [config, setConfig] = useState<BinConfig>(() => getDefaultBinConfig())
+  const [savedRevision, setSavedRevision] = useState('')
+  const draftRevision = JSON.stringify([config, placedTools, textLabels])
   const [name, setName] = useState('')
   const [stlUrl, setStlUrl] = useState<string | null>(null)
   const [stlUrls, setStlUrls] = useState<string[]>([])
@@ -219,6 +222,7 @@ export default function BinPage() {
         setName(data.name || '')
         const loadedConfig = buildBinConfig(data.bin_config)
         setConfig(loadedConfig)
+        setSavedRevision(JSON.stringify([loadedConfig, synced, data.text_labels]))
         const loadedSnapshot = {
           config: loadedConfig, placedTools: synced, textLabels: data.text_labels,
           name: data.name || '', gridSizingMode: 'auto' as const,
@@ -320,6 +324,7 @@ export default function BinPage() {
         placed_tools: placedTools,
         text_labels: textLabels,
       })
+      setSavedRevision(draftRevision)
     },
     [loading, binData, binId, name, config, placedTools, textLabels],
     150,
@@ -647,6 +652,8 @@ export default function BinPage() {
               <div className="flex justify-between"><span>Height</span><span>{(config.height_units * 7 + effectiveRimUnits * 7 + (config.stacking_lip ? 4.4 : 0)).toFixed(1)} mm</span></div>
             </div>
           </div>
+          {binData?.project_id && <ProjectSpaceUsage projectId={binData.project_id} binId={binId}
+            savedRevision={savedRevision} pending={draftRevision !== savedRevision || saving || !!saveError} />}
           <BinHeightPlanner binId={binId} config={config} placedTools={placedTools} onApply={applyHeightProposal}
             onRemove={id => handlePlacedToolsChange(placedTools.filter(tool => tool.id !== id), 'Remove tool')} />
         </div>
