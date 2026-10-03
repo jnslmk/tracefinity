@@ -37,6 +37,12 @@ use `git push --force-with-lease origin fork-main` **only while this branch has
 a single owner**. If shared, use `git merge upstream/main` instead of rebase
 and a normal `git push origin fork-main`; never rewrite shared history.
 
+On Node.js 26.8.2, run frontend tests with
+`NODE_OPTIONS=--no-experimental-webstorage pnpm test` from `frontend/`.
+Its experimental global `localStorage` can otherwise interfere with jsdom's
+storage environment. This is a test-runtime compatibility setting, not an
+application configuration change.
+
 The immutable fork release `v0.9.6-jnslmk.1` corresponds to
 `ghcr.io/jnslmk/tracefinity:0.9.6-jnslmk.1`. Publish a GitHub **prerelease** to
 trigger the release workflow; pushing the tag alone does not trigger it.
