@@ -483,6 +483,22 @@ export async function createBin(opts: { name?: string; project_id?: string | nul
   })
 }
 
+/**
+ * Uploads an STL as a planning-only bin. The mesh is stored normalised
+ * (centred in X/Y, z-min at 0) and cannot be edited; `project_id` links it to a
+ * project immediately so drawer plans can place it.
+ */
+export async function importBin(
+  file: File,
+  opts: { name?: string; project_id?: string | null } = {}
+): Promise<BinData> {
+  const formData = new FormData()
+  formData.append('file', file)
+  if (opts.name) formData.append('name', opts.name)
+  if (opts.project_id) formData.append('project_id', opts.project_id)
+  return fetchForm('/api/bins/import', formData)
+}
+
 export async function updateBin(
   binId: string,
   updates: {

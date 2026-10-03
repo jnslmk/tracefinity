@@ -11,16 +11,27 @@ interface Props {
   stlUrl: string
   splitUrls?: string[]
   insertUrl?: string
+  /**
+   * Called when the primary STL fails to load (e.g. the asset was purged or
+   * 404s). Without it the loader failure is silent and the canvas renders empty.
+   */
+  onLoadError?: () => void
 }
 
 type CameraView = 'home' | 'top' | 'front' | 'right' | 'fit'
 
 type RenderMode = 'solid' | 'edges'
 
-function StlModel({ url, renderMode, color = '#5ab4de', edgeColor = '#1e3d5c' }: { url: string; renderMode: RenderMode; color?: string; edgeColor?: string }) {
+function StlModel({ url, renderMode, color = '#5ab4de', edgeColor = '#1e3d5c', onError }: { url: string; renderMode: RenderMode; color?: string; edgeColor?: string; onError?: () => void }) {
   const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null)
   const [edgesGeometry, setEdgesGeometry] = useState<THREE.EdgesGeometry | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  // keep the latest callback without re-running the url-only load effect
+  const onErrorRef = useRef(onError)
+
+  useEffect(() => {
+    onErrorRef.current = onError
+  }, [onError])
 
   useEffect(() => {
     const loader = new STLLoader()
@@ -50,6 +61,7 @@ function StlModel({ url, renderMode, color = '#5ab4de', edgeColor = '#1e3d5c' }:
       (err) => {
         console.error('STL load error:', err)
         setLoadError(String(err))
+        onErrorRef.current?.()
       }
     )
 
@@ -246,7 +258,7 @@ const viewButtons: { view: CameraView; icon: typeof Box; label: string }[] = [
   { view: 'fit', icon: Box, label: 'Fit' },
 ]
 
-export function BinPreview3D({ stlUrl, splitUrls, insertUrl }: Props) {
+export function BinPreview3D({ stlUrl, splitUrls, insertUrl, onLoadError }: Props) {
   const [renderMode, setRenderMode] = useState<RenderMode>('solid')
   const dispatchView = useCallback((view: CameraView) => {
     window.dispatchEvent(new CustomEvent('bin-preview-view', { detail: view }))
@@ -266,7 +278,7 @@ export function BinPreview3D({ stlUrl, splitUrls, insertUrl }: Props) {
             {splitUrls && splitUrls.length > 0 ? (
               <SplitModels urls={splitUrls} renderMode={renderMode} />
             ) : (
-              <StlModel url={stlUrl} renderMode={renderMode} />
+              <StlModel url={stlUrl} renderMode={renderMode} onError={onLoadError} />
             )}
             {insertUrl && <StlModel url={insertUrl} renderMode={renderMode} color="#ff8844" edgeColor="#7a3310" />}
             <CameraController />

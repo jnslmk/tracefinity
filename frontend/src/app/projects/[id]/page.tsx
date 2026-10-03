@@ -24,6 +24,7 @@ import { Alert } from '@/components/Alert'
 import { BinConfigurator } from '@/components/BinConfigurator'
 import { ConfirmModal } from '@/components/ConfirmModal'
 import { SectionHeader } from '@/components/SectionHeader'
+import { ImportedBinUpload } from '@/components/ImportedBinUpload'
 import { ToolSummaryButton, ToolSummaryItem } from '@/components/ToolSummaryItem'
 import { useDeleteConfirmation } from '@/hooks/useDeleteConfirmation'
 import { binDefaultsFromConfig, buildBinConfig, getDefaultBinConfig, getDefaultBinDefaults } from '@/lib/binDefaults'
@@ -375,6 +376,28 @@ export default function ProjectPage() {
       setError(err instanceof Error ? err.message : 'failed to detach bin')
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function handleImportedBin() {
+    if (!project) return
+    // allSettled, matching the home load: a failing supplementary read (health)
+    // must not discard the refreshed project or hide the newly linked bin
+    const [binsResult, projectResult, healthResult] = await Promise.allSettled([
+      listBins(),
+      getProject(project.id),
+      getProjectHealth(project.id),
+    ])
+    if (binsResult.status === 'fulfilled') setBins(binsResult.value)
+    if (projectResult.status === 'fulfilled') setProject(projectResult.value)
+    if (healthResult.status === 'fulfilled') setHealthIssues(healthResult.value.issues)
+    if (binsResult.status === 'rejected' || projectResult.status === 'rejected') {
+      setError('The bin was imported, but the project could not be refreshed. Reload the page to see it.')
+    } else if (healthResult.status === 'rejected') {
+      // the bin is linked and the list is fresh; only the health report is missing
+      setError('Bin imported; project health could not be checked. Reload to retry.')
+    } else {
+      setError(null)
     }
   }
 
@@ -778,6 +801,15 @@ export default function ProjectPage() {
             Add existing bin
           </button>
         </SectionHeader>
+        {!collapsedSections.linkedBins && (
+          <div className="mb-3">
+            <ImportedBinUpload
+              projectId={project.id}
+              onImported={handleImportedBin}
+              onOpen={bin => router.push(projectScopedHref(project.id, `/bins/${bin.id}`))}
+            />
+          </div>
+        )}
         {!collapsedSections.linkedBins && addBinsOpen && (
           <div className="glass rounded-[8px] px-3 py-2 mb-3 space-y-2">
             <div className="flex items-center gap-3 flex-wrap">
@@ -823,7 +855,12 @@ export default function ProjectPage() {
                       {selectedExisting ? <CheckSquare className="w-3.5 h-3.5 text-accent" /> : <Square className="w-3.5 h-3.5 text-text-muted" />}
                       <span className="min-w-0 flex-1">
                         <span className="block text-[11px] text-text-primary truncate">{binLabel(bin)}</span>
-                        <span className="block text-[10px] text-text-muted">{bin.grid_x}x{bin.grid_y} · {bin.tool_count} tool{bin.tool_count !== 1 ? 's' : ''}</span>
+                        <span className="block text-[10px] text-text-muted">
+                          {bin.imported_model ? 'Imported · ' : ''}
+                          {bin.grid_x}x{bin.grid_y} · {bin.imported_model
+                            ? `${bin.imported_model.width_mm.toFixed(0)}×${bin.imported_model.depth_mm.toFixed(0)}×${bin.imported_model.height_mm.toFixed(0)} mm`
+                            : `${bin.tool_count} tool${bin.tool_count !== 1 ? 's' : ''}`}
+                        </span>
                       </span>
                     </button>
                   )
@@ -862,7 +899,12 @@ export default function ProjectPage() {
                     >
                       <span className="min-w-0">
                         <span className="block text-xs text-text-primary truncate">{binLabel(bin)}</span>
-                        <span className="block text-[10px] text-text-muted">{bin.grid_x}x{bin.grid_y} · {bin.tool_count} tool{bin.tool_count !== 1 ? 's' : ''}</span>
+                        <span className="block text-[10px] text-text-muted">
+                          {bin.imported_model ? 'Imported · ' : ''}
+                          {bin.grid_x}x{bin.grid_y} · {bin.imported_model
+                            ? `${bin.imported_model.width_mm.toFixed(0)}×${bin.imported_model.depth_mm.toFixed(0)}×${bin.imported_model.height_mm.toFixed(0)} mm`
+                            : `${bin.tool_count} tool${bin.tool_count !== 1 ? 's' : ''}`}
+                        </span>
                       </span>
                     </button>
                     <div className="flex items-center gap-1 flex-shrink-0">

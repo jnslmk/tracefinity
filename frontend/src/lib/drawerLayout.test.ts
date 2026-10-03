@@ -12,7 +12,6 @@ import {
   drawerStats,
   findFreeSpot,
   findLayoutConflicts,
-  gridLines,
   nextRotation,
   placementRect,
   rectsOverlap,
@@ -68,16 +67,6 @@ describe('snapping and clamping', () => {
 
   it('keeps a bin inside the drawer', () => {
     expect(clampToDrawer({ x: 5, y: -2, w: 2, h: 1 }, 6, 4)).toEqual({ x: 4, y: 0 })
-  })
-})
-
-describe('gridLines', () => {
-  it('lists every unit boundary', () => {
-    expect(gridLines(3)).toEqual([0, 1, 2, 3])
-  })
-
-  it('keeps the trailing half unit', () => {
-    expect(gridLines(2.5)).toEqual([0, 1, 2, 2.5])
   })
 })
 

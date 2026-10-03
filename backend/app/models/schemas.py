@@ -753,6 +753,22 @@ class BinConfig(BinDefaults):
     text_labels: list[TextLabel] = []
 
 
+class ImportedBinModel(BaseModel):
+    """Metadata for a user-uploaded planning-only STL bin.
+
+    The stored geometry is opaque and read-only: it cannot host traced
+    cutouts and its physical interfaces are never verified. ``width_mm``,
+    ``depth_mm`` and ``height_mm`` are the measured bounding-box extents of
+    the uploaded mesh; ``bin_config`` carries the detected nominal grid and
+    height used for planning only.
+    """
+
+    width_mm: float = Field(gt=0, allow_inf_nan=False)
+    depth_mm: float = Field(gt=0, allow_inf_nan=False)
+    height_mm: float = Field(gt=0, allow_inf_nan=False)
+    warnings: list[str] = []
+
+
 class BinModel(BaseModel):
     id: str
     name: str | None = None
@@ -762,6 +778,7 @@ class BinModel(BaseModel):
     text_labels: list[TextLabel] = []
     stl_path: str | None = None
     created_at: str | None = None
+    imported_model: ImportedBinModel | None = None
 
 
 class BinPreviewTool(BaseModel):
@@ -781,6 +798,7 @@ class BinSummary(BaseModel):
     height_units: int = 4
     half_grid_base: bool = False
     preview_tools: list[BinPreviewTool] = []
+    imported_model: ImportedBinModel | None = None
 
 
 class BinListResponse(BaseModel):

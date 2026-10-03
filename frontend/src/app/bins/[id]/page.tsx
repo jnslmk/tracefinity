@@ -5,6 +5,7 @@ import { useRouter, useParams } from 'next/navigation'
 import { BinEditor } from '@/components/BinEditor'
 import { BinConfigurator, BinHeightPlanner, calcMaxCutoutDepth } from '@/components/BinConfigurator'
 import { BinPreview3D } from '@/components/BinPreview3D'
+import { ImportedBinView } from '@/components/ImportedBinView'
 import { ToolBrowser } from '@/components/ToolBrowser'
 import { getBin, updateBin, generateBinStl, getBinStlUrl, getBinZipUrl, getBinThreemfUrl, getBinInsertUrl, getImageUrl, listTools, updateTool } from '@/lib/api'
 import { buildBinConfig, createPartialBinsValues, getDefaultBinConfig, resetDefaultBinConfig, saveDefaultBinConfig } from '@/lib/binDefaults'
@@ -127,10 +128,18 @@ export default function BinPage() {
 
   useEffect(() => {
     async function load() {
+      let imported = false
       try {
-        const [data, tools] = await Promise.all([getBin(binId), listTools()])
+        // the bin itself first: an imported bin needs no tool library, no config
+        // sync and no editor generation, and must not depend on listTools()
+        const data = await getBin(binId)
         setBinData(data)
+        if (data.imported_model) {
+          imported = true
+          return
+        }
 
+        const tools = await listTools()
         const toolMap = new Map(tools.map(t => [t.id, t]))
         const synced = data.placed_tools.map(pt => {
           const lib = toolMap.get(pt.tool_id)
@@ -159,13 +168,15 @@ export default function BinPage() {
         setError('Bin not found')
       } finally {
         setLoading(false)
-        setTimeout(() => doGenerateRef.current(), 100)
+        if (!imported) setTimeout(() => doGenerateRef.current(), 100)
       }
     }
     load()
   }, [binId])
 
   const doGenerate = useCallback(async () => {
+    // uploaded bins are never regenerated: the stored mesh is served back as-is
+    if (binData?.imported_model) return
     if (placedTools.length === 0 || gridLimitError) return
 
     const key = JSON.stringify({ placedTools, config, textLabels, smoothed: [...smoothedToolIds], levels: [...smoothLevels] })
@@ -209,7 +220,7 @@ export default function BinPage() {
         abortRef.current = null
       }
     }
-  }, [binId, placedTools, config, textLabels, smoothedToolIds, smoothLevels, gridLimitError])
+  }, [binId, binData, placedTools, config, textLabels, smoothedToolIds, smoothLevels, gridLimitError])
 
   useEffect(() => {
     doGenerateRef.current = doGenerate
@@ -233,7 +244,7 @@ export default function BinPage() {
 
   const { saving, saved, error: saveError } = useDebouncedSave(
     async () => {
-      if (!binData) return
+      if (!binData || binData.imported_model) return
       await updateBin(binId, {
         name: name || undefined,
         bin_config: config,
@@ -254,7 +265,7 @@ export default function BinPage() {
   }, [])
 
   useEffect(() => {
-    if (!binData) return
+    if (!binData || binData.imported_model) return
     if (generateTimeoutRef.current) clearTimeout(generateTimeoutRef.current)
     generateTimeoutRef.current = setTimeout(() => {
       doGenerate()
@@ -430,6 +441,12 @@ export default function BinPage() {
         <Alert variant="error">{error}</Alert>
       </div>
     )
+  }
+
+  // Uploaded planning bins are read-only: no editor, no tool placement, no config
+  // mutation. The stored mesh is served back by the generate endpoint unchanged.
+  if (binData?.imported_model) {
+    return <ImportedBinView bin={binData} />
   }
 
   const stlUrlWithVersion = stlUrl && !gridLimitError ? `${stlUrl}?v=${stlVersion}` : null

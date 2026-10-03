@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { ImageUploader } from '@/components/ImageUploader'
 import { ConfirmModal } from '@/components/ConfirmModal'
 import { SectionHeader } from '@/components/SectionHeader'
+import { ImportedBinUpload } from '@/components/ImportedBinUpload'
 import { uploadImage, listTools, listBins, listProjects, listPhotoStations, deleteTool, deleteBin, deleteProject, deletePhotoStation, updatePhotoStation, createBin, createProject, getImageUrl, getAvailableKeys } from '@/lib/api'
 import type { ToolSummary, BinSummary, BinPreviewTool, BinProjectSummary, PhotoStation, Point, ToolImageContext, AffineMatrix, ProjectStatus } from '@/types'
 import { polygonPathData } from '@/lib/svg'
@@ -463,6 +464,15 @@ export default function HomePage() {
     clearDelete()
   }
 
+  async function handleImportedBin() {
+    // refresh the collection so the new bin appears without a reload
+    try {
+      setBinsList(await listBins())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed to refresh bins')
+    }
+  }
+
   async function handleDeleteProject(id: string) {
     try {
       await deleteProject(id)
@@ -824,7 +834,7 @@ export default function HomePage() {
       )}
 
       {/* bins */}
-      {(binsList.length > 0 || toolsList.length > 0) && (
+      {!loading && (
         <div>
           <SectionHeader
             title="Bins"
@@ -841,7 +851,11 @@ export default function HomePage() {
             </button>
           </SectionHeader>
           {!collapsedSections.bins && (
-            binsList.length > 0 ? (
+            <>
+              <div className="mb-3">
+                <ImportedBinUpload onImported={handleImportedBin} onOpen={bin => router.push(`/bins/${bin.id}`)} />
+              </div>
+              {binsList.length > 0 ? (
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
                 {binsList.map(bin => (
                   <div
@@ -850,7 +864,12 @@ export default function HomePage() {
                     className="glass-card overflow-hidden cursor-pointer group"
                   >
                     <div className="aspect-[4/3] bg-inset flex items-center justify-center p-4 relative">
-                      {bin.preview_tools.length > 0 ? (
+                      {bin.imported_model ? (
+                        <div className="text-center">
+                          <Package className="w-6 h-6 text-text-muted/20 mx-auto mb-1" />
+                          <p className="text-[10px] text-text-muted">Imported STL</p>
+                        </div>
+                      ) : bin.preview_tools.length > 0 ? (
                         <BinPreview gridX={bin.grid_x} gridY={bin.grid_y} tools={bin.preview_tools} />
                       ) : (
                         <Package className="w-6 h-6 text-text-muted/20" />
@@ -889,7 +908,14 @@ export default function HomePage() {
                           <Grid3X3 className="w-2.5 h-2.5" />
                           {bin.grid_x}x{bin.grid_y}
                         </span>
-                        {bin.tool_count > 0 && (
+                        {bin.imported_model ? (
+                          <span
+                            className="text-[10px] text-text-muted flex-shrink-0"
+                            title="Detected bounding box"
+                          >
+                            {bin.imported_model.width_mm.toFixed(0)}×{bin.imported_model.depth_mm.toFixed(0)}×{bin.imported_model.height_mm.toFixed(0)} mm
+                          </span>
+                        ) : bin.tool_count > 0 && (
                           <span className="text-[10px] text-text-muted flex-shrink-0">
                             {bin.tool_count} tool{bin.tool_count !== 1 ? 's' : ''}
                           </span>
@@ -910,7 +936,8 @@ export default function HomePage() {
                   Create your first bin
                 </button>
               </div>
-            )
+              )}
+            </>
           )}
         </div>
       )}

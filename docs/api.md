@@ -79,6 +79,7 @@ Trace and mask-trace responses include the final visible `Polygon.label` values 
 - `GET /api/bins` - list bins
 - `GET /api/bins/{id}` - get bin (syncs placed tools with library versions)
 - `POST /api/bins` - create bin (optionally with tool_ids for auto-sizing and bin_config defaults)
+- `POST /api/bins/import` - upload an existing STL bin as a read-only planning bin (multipart `file`, optional `name`, `project_id`)
 - `POST /api/bins/auto-layout` - arrange requested tools without creating a bin
 - `PUT /api/bins/{id}` - update bin
 - `DELETE /api/bins/{id}` - delete bin + output files
@@ -111,6 +112,26 @@ cutout override changes, external height and clearance, or an explanation when n
 supported configuration fits. These endpoints never change saved geometry.
 Apply a chosen alternative with the existing `PUT /api/bins/{id}` and then
 `POST /api/bins/{id}/generate`. Body and rim limits remain 20 units each.
+
+`POST /api/bins/import` is multipart (`file`, optional `name`, optional
+`project_id`) and is the way to create a planning-only bin. `file` is an STL no
+larger than 25 MiB, assumed to be in millimetres with Z up, centred in X/Y with
+its Z-minimum dropped to zero and stored as a binary STL in the user's
+`imports/` directory. Width and depth are matched to full (42 mm) or half
+(21 mm) grid cells within 0.75 mm; height is matched to 7 mm body units with or
+without the 4.4 mm stacking lip within 0.75 mm. A non-standard axis is accepted
+with a warning and rounded up to a conservative nominal footprint. The response
+is the created `BinModel`: `imported_model` carries the measured `width_mm`,
+`depth_mm` and `height_mm` bounding box plus `warnings`, and `bin_config` carries
+the detected nominal grid, height and half-grid flag used for planning.
+
+An imported bin is read-only. `PUT /api/bins/{id}` accepts only `name` and
+`project_id`; sending `bin_config`, `placed_tools` or `text_labels` returns `400`.
+`POST /api/bins/{id}/generate` returns a URL for the stored upload instead of
+regenerating geometry, and `GET /api/bins/{id}/height-planning` reports an
+`uncertain` assessment with no alternatives. The stored mesh lives outside the
+export retention sweep, so it survives until the bin is deleted. Records written
+before imports existed load with `imported_model: null`.
 
 Both generation endpoints may return `503 Service Unavailable` with
 `Retry-After: 5` when `STL_GENERATION_CONCURRENCY` is configured and every

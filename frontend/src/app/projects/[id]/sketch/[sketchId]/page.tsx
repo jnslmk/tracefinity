@@ -33,6 +33,7 @@ import {
   snapForBin,
   snapUnits,
 } from '@/lib/drawerLayout'
+import { assessmentCoversDraft, heightLayers, occupyingPlacementIds, resolveLayerSelection } from '@/lib/drawerLayers'
 import { binLabel } from '@/lib/projectSelectors'
 import { cn } from '@/lib/utils'
 import { AlertTriangle, Box, Check, Copy, Grid2x2, LayoutGrid, Loader2, Palette, Plus, RotateCw, Sparkles, Trash2, TriangleAlert, X } from 'lucide-react'
@@ -93,6 +94,8 @@ export default function ProjectSketchPage() {
   // bins were never added because the plan was empty
   const [arrangeMisfits, setArrangeMisfits] = useState<{ kind: 'kept' | 'skipped'; ids: string[] } | null>(null)
   const [view, setView] = useState<ViewMode>('2d')
+  // null shows every level; a number pins the canvas to one assessed base elevation
+  const [layerElevation, setLayerElevation] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -152,6 +155,46 @@ export default function ProjectSketchPage() {
   const sideMinY = Math.min(-15, sideBaseline - Math.max(0, ...(assessment?.placements.map(p => p.top_mm) ?? [])) - 15)
   const selectedPlacement = placements.find(placement => placement.id === selectedPlacementId) || null
 
+  // Levels come only from an assessment that describes exactly the placements on
+  // the draft, so a stale or failed one cannot invent a layer the plan lacks.
+  const draftMatchesAssessment = assessment !== null && assessmentCoversDraft(
+    placements.map(placement => placement.id),
+    assessment.placements.map(item => item.placement_id),
+  )
+  const layers = useMemo(
+    () => (draftMatchesAssessment && assessment
+      ? heightLayers(assessment.placements.map(item => item.z_mm))
+      : []),
+    [assessment, draftMatchesAssessment],
+  )
+  // carry the chosen elevation across refreshes; a removed level clamps to its nearest survivor
+  useEffect(() => {
+    if (layers.length === 0) return
+    setLayerElevation(previous => resolveLayerSelection(previous, layers))
+  }, [layers])
+  const visiblePlacementIds = useMemo(
+    () => (layerElevation === null || !draftMatchesAssessment || !assessment
+      ? null
+      : occupyingPlacementIds(assessment.placements, layerElevation)),
+    [assessment, draftMatchesAssessment, layerElevation],
+  )
+  const visiblePlacements = useMemo(
+    () => (visiblePlacementIds === null ? placements : placements.filter(placement => visiblePlacementIds.has(placement.id))),
+    [placements, visiblePlacementIds],
+  )
+  const visibleAssessedPlacements = useMemo(
+    () => (!assessment || visiblePlacementIds === null
+      ? assessment?.placements ?? []
+      : assessment.placements.filter(item => visiblePlacementIds.has(item.placement_id))),
+    [assessment, visiblePlacementIds],
+  )
+  // a filtered-out bin must not stay selected: its controls would edit what is off screen
+  useEffect(() => {
+    if (visiblePlacementIds !== null && selectedPlacementId !== null && !visiblePlacementIds.has(selectedPlacementId)) {
+      setSelectedPlacementId(null)
+    }
+  }, [visiblePlacementIds, selectedPlacementId])
+
   // a "kept" notice only stays while some of those placements still exist and still conflict
   const arrangeNotice = useMemo(() => {
     if (!arrangeMisfits) return null
@@ -193,6 +236,9 @@ export default function ProjectSketchPage() {
       setPlacements(updated.bin_layout)
       setRemoveDialogId(null)
       if (!updated.bin_layout.some(p => p.id === selectedPlacementId)) setSelectedPlacementId(null)
+      // a stack action moves bins between elevations, so show every level to make
+      // the new arrangement inspectable; a same-elevation XY move keeps the layer
+      if (action === 'stack_on' || action === 'move_up' || action === 'move_down') setLayerElevation(null)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Stack action failed; saved placements are unchanged')
@@ -239,7 +285,9 @@ export default function ProjectSketchPage() {
     const placementId = newPlacementId()
     setSelectedPlacementId(placementId)
     setPlacements(prev => [...prev, { id: placementId, bin_id: binId, x, y, rotation: 0, color: null }])
-  }, [])
+    // a dropped bin rests on the floor; showing all levels keeps it from vanishing
+    if (layerElevation !== null && layerElevation > 0) setLayerElevation(null)
+  }, [layerElevation])
 
   const handlePlaceInFreeSpot = useCallback((binId: string) => {
     const bin = binMap.get(binId)
@@ -258,7 +306,9 @@ export default function ProjectSketchPage() {
         color: colorForBin(binId),
       }]
     })
-  }, [binMap, gridX, gridY, occupiedRects, colorForBin])
+    // a new copy rests on the floor; showing all levels keeps it from vanishing
+    if (layerElevation !== null && layerElevation > 0) setLayerElevation(null)
+  }, [binMap, gridX, gridY, occupiedRects, colorForBin, layerElevation])
 
   const handleDuplicate = useCallback((placementId: string) => {
     const source = placements.find(placement => placement.id === placementId)
@@ -278,7 +328,9 @@ export default function ProjectSketchPage() {
         rotation: spot?.rotation ?? source.rotation,
       }]
     })
-  }, [placements, binMap, gridX, gridY, occupiedRects])
+    // the copy is re-seated on the floor; showing all levels keeps it from vanishing
+    if (layerElevation !== null && layerElevation > 0) setLayerElevation(null)
+  }, [placements, binMap, gridX, gridY, occupiedRects, layerElevation])
 
   const handleSetColor = useCallback((placementId: string, color: string | null) => {
     setPlacements(prev => prev.map(placement => (
@@ -403,6 +455,16 @@ export default function ProjectSketchPage() {
   const conflictCount = overlapping.size + outOfBounds.size
   const selectedBin = selectedPlacement ? binMap.get(selectedPlacement.bin_id) : null
 
+  // slider position 0 is "show all"; 1..n are the layers in ascending elevation
+  const layerIndex = layerElevation === null
+    ? 0
+    : Math.max(1, layers.findIndex(layer => layer.z_mm === layerElevation) + 1)
+  const layerPercent = layers.length > 0 ? (layerIndex / layers.length) * 100 : 100
+  const assessmentStatus = assessment?.status ?? null
+  const layerValueText = layerElevation === null
+    ? `Showing all ${layers.length} bin base levels`
+    : `Level ${layerIndex} of ${layers.length}, base ${layerElevation.toFixed(1)} mm or ${(layerElevation / 7).toFixed(1)} units`
+
   return (
     <div className="h-[calc(100vh-44px)] flex" inert={actionBusy}>
       {/* sidebar: drawer size, space usage, project bins */}
@@ -505,6 +567,67 @@ export default function ProjectSketchPage() {
             )}
           </div>
 
+          {hasDrawer && <section aria-label="Height layers" className="glass rounded-[10px] px-3 py-3">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <h3 className="text-[10px] font-semibold text-text-muted uppercase tracking-[1.5px]">Height layer</h3>
+              <button
+                type="button"
+                onClick={() => setLayerElevation(null)}
+                aria-pressed={layerElevation === null}
+                className={cn(
+                  'rounded-[7px] px-2 py-0.5 text-[10px] transition-colors cursor-pointer',
+                  layerElevation === null ? 'bg-accent-muted text-accent' : 'glass-sm text-text-secondary hover:bg-glass-hover',
+                )}
+              >
+                Show all
+              </button>
+            </div>
+            {assessmentError ? (
+              <p role="alert" className="text-[11px] text-text-secondary">
+                Assessment failed, so no bin base elevation can be verified. Layer selection stays off: {assessmentError}
+              </p>
+            ) : !assessment ? (
+              <p role="status" className="text-[11px] text-text-secondary">
+                Assessing the current plan. Layer selection unlocks once it has an assessment.
+              </p>
+            ) : !draftMatchesAssessment ? (
+              <p role="status" className="text-[11px] text-text-secondary">
+                The latest assessment does not describe the current draft, so layer selection stays off. Reassess shared tools and bins to unlock it.
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                <input
+                  type="range"
+                  min={0}
+                  max={layers.length}
+                  step={1}
+                  value={layerIndex}
+                  onChange={event => setLayerElevation(layers[Number(event.target.value) - 1]?.z_mm ?? null)}
+                  aria-label="Bin base elevation layer"
+                  aria-valuetext={layerValueText}
+                  className="w-full"
+                  style={{ '--slider-pct': `${layerPercent}%` } as React.CSSProperties}
+                />
+                <p role="status" className="text-[11px] text-text-secondary tabular-nums">
+                  {layerElevation === null
+                    ? `All ${layers.length} level${layers.length !== 1 ? 's' : ''} · ${placements.length} bin${placements.length !== 1 ? 's' : ''}`
+                    : `Level ${layerIndex} of ${layers.length} · ${layerElevation.toFixed(1)} mm · ${(layerElevation / 7).toFixed(1)}u · ${visiblePlacements.length} of ${placements.length} bins visible`}
+                </p>
+                {assessmentStatus !== null && assessmentStatus !== 'verified' && (
+                  <p className="text-[10px] text-amber-500">
+                    Assessment is {assessmentStatus}: these elevations are conservative approximations, not verified mating datums.
+                  </p>
+                )}
+                <p className="text-[10px] text-text-muted">
+                  Elevations come from the assessment. A bin spanning a level stays visible; one ending at it does not.
+                </p>
+              </div>
+            )}
+            <p className="text-[10px] text-text-muted mt-2">
+              New and dropped bins always rest on the floor, so an upper level hides them. Choose Show all or level 1 to see them again.
+            </p>
+          </section>}
+
           <section aria-label="Toolbox fit diagnostics" className="glass rounded-[10px] p-3 text-[11px] text-text-secondary space-y-2">
             <button type="button" onClick={refreshAssessment} className="btn-secondary px-2 py-1">Reassess shared tools and bins</button>
             {assessmentError && <p role="alert">{assessmentError}</p>}
@@ -520,18 +643,33 @@ export default function ProjectSketchPage() {
               {assessment.unhoused_tool_ids.map(id => <p key={id}>Not housed in this plan: {id}</p>)}
               {assessment.stacks.map(stack => <p key={stack.root_id}>Stack {stack.root_id.slice(0, 8)} headroom: {stack.headroom_mm?.toFixed(2) ?? 'unknown'} mm</p>)}
               <p>Fit is conditional on measured resting thickness, conservative envelopes, gap and intact support. Physically check printed parts.</p>
-              {selectedPlacementId && assessment.placements.filter(p => p.placement_id === selectedPlacementId).map(p => <div key={p.placement_id} className="border-t border-border pt-2">
-                <p>Selected elevation {p.z_mm.toFixed(2)} mm; top {p.top_mm.toFixed(2)} mm; headroom {p.headroom_mm?.toFixed(2) ?? 'unknown'} mm. Support {p.support_compatible === null ? 'floor' : p.support_compatible ? 'compatible' : 'incompatible'}.</p>
-                {p.envelopes.map(e => <p key={e.id}>{e.name}: {!e.seating_verified ? 'resting elevation cannot be established' : e.thickness_mm == null ? 'unknown thickness' : `${e.thickness_mm} mm conservative envelope; rests at ${e.resting_z_mm?.toFixed(2)} mm; upper-bin clearance ${e.clearance_mm?.toFixed(2)} mm`}{e.tool_id === p.limiting_tool_id ? ' (limiting tool)' : ''}</p>)}
-              </div>)}
+              {selectedPlacementId && assessment.placements.filter(p => p.placement_id === selectedPlacementId).map(p => {
+                // an imported stack can sit on a support whose interface is not confirmed:
+                // that is not a floor seat, so a null verdict may not read as "floor"
+                const support = p.support_compatible === null
+                  ? (selectedPlacement?.support_id ? 'unverified' : 'floor')
+                  : p.support_compatible ? 'compatible' : 'incompatible'
+                return <div key={p.placement_id} className="border-t border-border pt-2">
+                  <p>Selected elevation {p.z_mm.toFixed(2)} mm; top {p.top_mm.toFixed(2)} mm; headroom {p.headroom_mm?.toFixed(2) ?? 'unknown'} mm. Support {support}.</p>
+                  {p.envelopes.map(e => <p key={e.id}>{e.name}: {!e.seating_verified ? 'resting elevation cannot be established' : e.thickness_mm == null ? 'unknown thickness' : `${e.thickness_mm} mm conservative envelope; rests at ${e.resting_z_mm?.toFixed(2)} mm; upper-bin clearance ${e.clearance_mm?.toFixed(2)} mm`}{e.tool_id === p.limiting_tool_id ? ' (limiting tool)' : ''}</p>)}
+                </div>
+              })}
             </>}
           </section>
           {placements.length > 0 && <section aria-label="Stack members" className="glass rounded-[10px] p-3 text-[11px] space-y-2">
             <h3 className="font-semibold text-text-primary">Select every stack member</h3>
-            {placements.map((p, i) => <button key={p.id} type="button" aria-pressed={selectedPlacementId === p.id}
-              className="btn-secondary block w-full px-2 py-1 text-left" onClick={() => setSelectedPlacementId(p.id)}>
-              Placement {i + 1}: {binMap.get(p.bin_id)?.name || p.bin_id} · {p.support_id ? 'supported' : 'floor'}
-            </button>)}
+            {visiblePlacementIds !== null && <p className="text-[10px] text-text-muted">
+              Members hidden by the selected height layer cannot be selected here until you show all levels.
+            </p>}
+            {placements.map((p, i) => {
+              const hidden = visiblePlacementIds !== null && !visiblePlacementIds.has(p.id)
+              return <button key={p.id} type="button" aria-pressed={selectedPlacementId === p.id} disabled={hidden}
+                title={hidden ? 'Hidden at the selected height layer' : undefined}
+                className={cn('btn-secondary block w-full px-2 py-1 text-left', hidden && 'opacity-40 cursor-default')}
+                onClick={() => setSelectedPlacementId(p.id)}>
+                Placement {i + 1}: {binMap.get(p.bin_id)?.name || p.bin_id} · {p.support_id ? 'supported' : 'floor'}
+              </button>
+            })}
           </section>}
           {hasDrawer && (
             <div className="glass rounded-[10px] px-3 py-3">
@@ -736,7 +874,7 @@ export default function ProjectSketchPage() {
           ) : view === '2d' ? (
             <DrawerSketchCanvas
               bins={binMap}
-              placements={placements}
+              placements={visiblePlacements}
               drawerX={gridX}
               drawerY={gridY}
               selectedPlacementId={selectedPlacementId}
@@ -756,7 +894,7 @@ export default function ProjectSketchPage() {
                   <line x1="0" x2={gridX * GRID_UNIT} y1="0" y2="0" stroke="var(--color-text-primary)" strokeDasharray="4 2" />
                   <text x="0" y="-5" fontSize="5" fill="var(--color-text-primary)">Closed lid ceiling {assessment.height_mm} mm</text>
                 </>}
-                {assessment.placements.map(p => {
+                {visibleAssessedPlacements.map(p => {
                   const placement = placements.find(item => item.id === p.placement_id)
                   const bin = placement && binMap.get(placement.bin_id)
                   if (!placement || !bin) return null
@@ -782,7 +920,7 @@ export default function ProjectSketchPage() {
           ) : (
             <DrawerSketch3D
               bins={binMap}
-              placements={placements}
+              placements={visiblePlacements}
               drawerX={gridX}
               drawerY={gridY}
               selectedPlacementId={selectedPlacementId}

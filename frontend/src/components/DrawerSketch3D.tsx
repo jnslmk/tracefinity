@@ -101,9 +101,17 @@ function BinStlModel({ url, color, renderMode, fallback, widthMm, depthMm }: {
       url,
       geo => {
         if (disposed) { geo.dispose(); return }
-        // STL is z-up; match the drawer axes and put the corner at the origin
+        // STL is z-up; match the drawer axes and put the footprint corner at the origin.
+        // Generated STLs are already corner-aligned, uploaded ones are centred in X/Y,
+        // so centre on the mesh's own bounding box before placing it in the grid cell.
         geo.rotateX(-Math.PI / 2)
-        geo.translate(widthMm / 2, 0, depthMm / 2)
+        geo.computeBoundingBox()
+        const box = geo.boundingBox!
+        geo.translate(
+          widthMm / 2 - (box.min.x + box.max.x) / 2,
+          -box.min.y,
+          depthMm / 2 - (box.min.z + box.max.z) / 2,
+        )
         geo.computeVertexNormals()
         loadedGeo = geo
         loadedEdges = new THREE.EdgesGeometry(geo, 30)
@@ -183,14 +191,17 @@ function PlacedBin({
   const rect = placementRect(placement, bin)
   const footprint = binFootprint(bin, placement.rotation)
   const offset = rotationOffsetMm(placement.rotation, bin)
+  // Uploaded bins carry no verified elevation; fall back to the bounding-box
+  // height from their import metadata rather than a nominal grid height.
+  const fallbackHeightMm = bin.imported_model?.height_mm ?? physical.external_height_mm
   const block = (<>
     <BinBlock
       widthMm={bin.grid_x * GRID_UNIT}
       depthMm={bin.grid_y * GRID_UNIT}
-      heightMm={physical.external_height_mm}
+      heightMm={fallbackHeightMm}
       color={color}
     />
-    <Html center position={[bin.grid_x * GRID_UNIT / 2, physical.external_height_mm + 5, bin.grid_y * GRID_UNIT / 2]}>
+    <Html center position={[bin.grid_x * GRID_UNIT / 2, fallbackHeightMm + 5, bin.grid_y * GRID_UNIT / 2]}>
       <span className="text-[10px] bg-surface text-text-primary whitespace-nowrap px-1">Approximate block: geometry pending or unavailable</span>
     </Html>
   </>)
@@ -271,44 +282,52 @@ function DrawerModels({ bins, placements, selectedPlacementId, overlapping, outO
 }
 
 // sits inside <Bounds>, listens for view commands via custom event
-function CameraController() {
+function CameraController({ fitKey }: { fitKey: string }) {
   const bounds = useBounds()
   const { camera } = useThree()
-  const controls = useThree(s => s.controls) as { update?: () => void } | null
-  const fittedRef = useRef(false)
+  const controls = useThree(s => s.controls) as { target?: THREE.Vector3; update?: () => void } | null
+  const fittedKeyRef = useRef<string | null>(null)
 
-  // fit once on initial load only
+  // Refit whenever the visible content changes. The assessment arrives after the
+  // first render, so a one-shot fit only ever measured the floor and left taller
+  // stacked bins above the viewport. The guard is inside the timer so a Bounds
+  // identity change (controls mounting) reschedules instead of cancelling the fit.
   useEffect(() => {
-    if (fittedRef.current) return
-    fittedRef.current = true
-    const t = setTimeout(() => bounds.refresh().fit(), 50)
+    const t = setTimeout(() => {
+      if (fittedKeyRef.current === fitKey) return
+      fittedKeyRef.current = fitKey
+      bounds.refresh().fit()
+    }, 50)
     return () => clearTimeout(t)
-  }, [bounds])
+  }, [bounds, fitKey])
 
   useEffect(() => {
     function handleView(e: Event) {
       const view = (e as CustomEvent<CameraView>).detail
-      const dist = camera.position.length() || 400
+      // pivot on the framed content centre, not the floor, so elevated stacks
+      // stay in frame for every preset
+      const pivot = controls?.target?.clone() ?? new THREE.Vector3(0, 0, 0)
+      const dist = camera.position.distanceTo(pivot) || 400
 
       switch (view) {
         case 'home':
-          camera.position.set(0, dist * 0.7, dist * 0.7)
+          camera.position.set(pivot.x, pivot.y + dist * 0.7, pivot.z + dist * 0.7)
           break
         case 'top':
-          camera.position.set(0, dist, 0.01)
+          camera.position.set(pivot.x, pivot.y + dist, pivot.z + 0.01)
           break
         case 'front':
-          camera.position.set(0, 0.01, dist)
+          camera.position.set(pivot.x, pivot.y + 0.01, pivot.z + dist)
           break
         case 'right':
-          camera.position.set(dist, 0.01, 0.01)
+          camera.position.set(pivot.x + dist, pivot.y + 0.01, pivot.z + 0.01)
           break
         case 'fit':
           bounds.refresh().fit()
           return
       }
 
-      camera.lookAt(0, 0, 0)
+      camera.lookAt(pivot)
       controls?.update?.()
     }
 
@@ -343,6 +362,17 @@ export function DrawerSketch3D({
   const depthMm = drawerY * GRID_UNIT
   const span = Math.max(widthMm, depthMm)
 
+  // changes whenever the framed content changes: drawer size, assessment revision,
+  // ceiling height, or any placement's elevation/top, so the camera refits when
+  // stacked or imported bins are added instead of framing the floor alone
+  const fitKey = useMemo(() => [
+    drawerX,
+    drawerY,
+    assessment?.geometry_revision ?? 'none',
+    assessment?.height_mm ?? 'none',
+    assessment ? assessment.placements.map(p => `${p.placement_id}:${p.z_mm}:${p.top_mm}`).join(',') : '',
+  ].join('|'), [drawerX, drawerY, assessment])
+
   const dispatchView = useCallback((view: CameraView) => {
     window.dispatchEvent(new CustomEvent(VIEW_EVENT, { detail: view }))
   }, [])
@@ -369,7 +399,7 @@ export function DrawerSketch3D({
                 <meshStandardMaterial color="#e57474" transparent opacity={.12} depthWrite={false} />
               </mesh>}
             </group>
-            <CameraController />
+            <CameraController fitKey={fitKey} />
           </Bounds>
         </Suspense>
 

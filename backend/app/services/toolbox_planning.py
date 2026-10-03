@@ -23,6 +23,10 @@ def support_problem(lower, upper, bins, physical):
     a, b = bins[lower.bin_id].bin_config, bins[upper.bin_id].bin_config
     if (lower.x, lower.y, *footprint(lower, a)) != (upper.x, upper.y, *footprint(upper, b)):
         return "Stack members must have aligned matching footprints after rotation"
+    # an imported model has no verified mating geometry: only alignment can be
+    # checked, and the physical interface stays uncertain rather than verified
+    if bins[lower.bin_id].imported_model or bins[upper.bin_id].imported_model:
+        return None
     if not a.stacking_lip:
         return "Supporting bin has no stacking lip"
     if a.half_grid_base != b.half_grid_base:
@@ -54,6 +58,29 @@ _ASSESS_CACHE: dict[str, dict] = {}
 _ASSESS_CACHE_LIMIT = 32
 
 
+def imported_assessment(bin_data):
+    """Planning view of an imported model: bounding box only, never verified.
+
+    No envelopes are fabricated, no mating geometry is claimed, and the
+    conservative stack increment is the measured bounding-box height.
+    """
+    model = bin_data.imported_model
+    return {
+        "external_height_mm": model.height_mm,
+        "stack_increment_mm": model.height_mm,
+        "support_error": None,
+        "seating_errors": {},
+        "envelopes": [],
+        "missing_tool_ids": [],
+        "limiting_tool_id": None,
+        "clearance_mm": None,
+        "violations": [],
+        "status": "uncertain",
+        "imported": True,
+        "import_warnings": list(model.warnings),
+    }
+
+
 def assess_bin(bin_data, tools, gap=0, upper_config=None, relative_rotation=0, prepared=None):
     # ponytail: ~0.5s per call and a pure function of its inputs; page reopens,
     # window-focus replans and duplicate fires hit this instead of re-verifying
@@ -73,6 +100,8 @@ def assess_bin(bin_data, tools, gap=0, upper_config=None, relative_rotation=0, p
 
 
 def _assess_bin(bin_data, tools, gap=0, upper_config=None, relative_rotation=0, prepared=None):
+    if bin_data.imported_model is not None:
+        return imported_assessment(bin_data)
     config = bin_data.bin_config
     request = GenerateRequest.model_validate({
         **config.model_dump(), "text_labels": [label.model_dump() for label in config.text_labels + bin_data.text_labels],
@@ -235,7 +264,11 @@ def assess_plan(project, sketch, user_bins, user_tools):
         if p.bin_id not in bins:
             continue
         upper = next((q for q in sketch.bin_layout if q.support_id == p.id), None)
-        upper_config = bins[upper.bin_id].bin_config if upper and upper.bin_id in bins else None
+        upper_data = bins.get(upper.bin_id) if upper else None
+        # an imported upper has no generated mating geometry, so passing its
+        # nominal config would let the lower bin's assessment falsely verify
+        # the interface against a synthetic shell
+        upper_config = None if upper_data is None or upper_data.imported_model else upper_data.bin_config
         bin_assessments[p.id] = assess_bin(
             bins[p.bin_id], tools, sketch.safety_clearance_mm, upper_config,
             (upper.rotation - p.rotation) % 360 if upper else 0,
@@ -257,6 +290,32 @@ def assess_plan(project, sketch, user_bins, user_tools):
             elevations[p.id], roots[p.id] = 0, p.id
         return elevations[p.id]
 
+    def elevation_uncertain(placement) -> bool:
+        """True when a placement's conservative height is not a known elevation.
+
+        Uncertainty enters wherever the interface below is an uploaded model:
+        its mating height is unverified, so the placement's Z (and any ceiling
+        excess derived from it) is an estimate, not a proven collision. A root
+        imported bin sits at Z=0 with an exactly measured height, so it stays
+        definite.
+        """
+        node, seen = placement, set()
+        while node is not None and node.id not in seen:
+            seen.add(node.id)
+            if node.support_id is None:
+                return False
+            lower = by_id.get(node.support_id)
+            if lower is None:
+                return True
+            node_bin = bins.get(node.bin_id)
+            lower_bin = bins.get(lower.bin_id)
+            if (node_bin is not None and node_bin.imported_model is not None) or (
+                lower_bin is not None and lower_bin.imported_model is not None
+            ):
+                return True
+            node = lower
+        return False
+
     rectangles = []
     for p in sketch.bin_layout:
         bin_data = bins.get(p.bin_id)
@@ -274,32 +333,61 @@ def assess_plan(project, sketch, user_bins, user_tools):
         compatible = None
         if p.support_id:
             problem = support_problem(by_id[p.support_id], p, bins, bin_assessments[p.support_id])
-            compatible = problem is None
             if problem:
+                compatible = False
                 violations.append({"code": "support", "placement_id": p.id, "message": problem})
+            elif bins[by_id[p.support_id].bin_id].imported_model or bin_data.imported_model:
+                # alignment verified, physical interface is not
+                unresolved.append(
+                    "A stack joins an imported model; the physical mating interface is unverified"
+                )
+            else:
+                compatible = True
+        uncertain_elevation = elevation_uncertain(p)
         upper = next((q for q in sketch.bin_layout if q.support_id == p.id), None)
         if upper:
-            violations.extend({**v, "placement_id": p.id} for v in assessment["violations"] if v["code"] in ("tool_clearance", "insert_clearance"))
+            interface_violations = [v for v in assessment["violations"] if v["code"] in ("tool_clearance", "insert_clearance")]
+            upper_data = bins.get(upper.bin_id)
+            if upper_data is not None and upper_data.imported_model is not None:
+                # the underside above is an uploaded mesh, so these figures came
+                # from a synthetic same-shape upper, not from the real one
+                if interface_violations:
+                    unresolved.append(f"Clearance to the imported bin stacked above placement {p.id} is unverified")
+            else:
+                violations.extend({**v, "placement_id": p.id} for v in interface_violations)
         violations.extend({**v, "placement_id": p.id} for v in assessment["violations"] if v["code"] == "tool_seating")
         top = max([z + assessment["external_height_mm"], *[z+(e["top_mm"] if e["top_mm"] is not None else e["resting_z_mm"]) for e in assessment["envelopes"] if e["resting_z_mm"] is not None]])
         headroom = None if sketch.container_height_mm is None else sketch.container_height_mm - top - sketch.safety_clearance_mm
+        estimated_excess = False
         if config.insert_enabled and sketch.container_height_mm is not None:
             for envelope in assessment["envelopes"]:
                 if envelope["resting_z_mm"] is None:
                     continue
                 insert_headroom = sketch.container_height_mm-z-envelope["resting_z_mm"]-sketch.safety_clearance_mm
-                if insert_headroom < -1e-7:
+                if insert_headroom < -1e-7 and not uncertain_elevation:
                     violations.append({"code": "insert_ceiling", "placement_id": p.id, "tool_id": envelope["tool_id"],
                                        "message": f"{envelope['name']} insert interferes with the closed lid",
                                        "clearance_mm": insert_headroom})
+                elif insert_headroom < -1e-7:
+                    estimated_excess = True
         if headroom is not None and headroom < -1e-7:
-            colliding_tools = [e for e in assessment["envelopes"] if e["top_mm"] is not None and z+e["top_mm"]+sketch.safety_clearance_mm > sketch.container_height_mm+1e-7]
-            for envelope in colliding_tools:
-                violations.append({"code": "ceiling", "placement_id": p.id, "tool_id": envelope["tool_id"],
-                                   "message": f"{envelope['name']} envelope interferes with the closed lid",
-                                   "clearance_mm": sketch.container_height_mm-z-envelope["top_mm"]-sketch.safety_clearance_mm})
-            if z+assessment["external_height_mm"]+sketch.safety_clearance_mm > sketch.container_height_mm+1e-7:
-                violations.append({"code": "ceiling", "placement_id": p.id, "message": "Bin exterior interferes with the closed lid", "clearance_mm": headroom})
+            if uncertain_elevation:
+                estimated_excess = True
+            else:
+                colliding_tools = [e for e in assessment["envelopes"] if e["top_mm"] is not None and z+e["top_mm"]+sketch.safety_clearance_mm > sketch.container_height_mm+1e-7]
+                for envelope in colliding_tools:
+                    violations.append({"code": "ceiling", "placement_id": p.id, "tool_id": envelope["tool_id"],
+                                       "message": f"{envelope['name']} envelope interferes with the closed lid",
+                                       "clearance_mm": sketch.container_height_mm-z-envelope["top_mm"]-sketch.safety_clearance_mm})
+                if z+assessment["external_height_mm"]+sketch.safety_clearance_mm > sketch.container_height_mm+1e-7:
+                    violations.append({"code": "ceiling", "placement_id": p.id, "message": "Bin exterior interferes with the closed lid", "clearance_mm": headroom})
+        if estimated_excess:
+            # the elevation is a conservative estimate over an unverified imported
+            # interface, so this excess is expected, not a known collision
+            unresolved.append(
+                f"Estimated ceiling clearance for placement {p.id} is uncertain: it rests on an imported model "
+                "whose assembled mating height is unverified"
+            )
         envelopes = [{**e, "points": [drawer_point(pt, p, config) for pt in e["points"]],
                       "interior_rings": [[drawer_point(pt, p, config) for pt in ring] for ring in e["interior_rings"]],
                       "resting_z_mm": None if e["resting_z_mm"] is None else z+e["resting_z_mm"], "top_mm": None if e["top_mm"] is None else z+e["top_mm"]} for e in assessment["envelopes"]]
@@ -347,6 +435,7 @@ def assess_plan(project, sketch, user_bins, user_tools):
                 has_stl=b.stl_path is not None, grid_x=b.bin_config.grid_x, grid_y=b.bin_config.grid_y,
                 height_units=b.bin_config.height_units, half_grid_base=b.bin_config.half_grid_base,
                 preview_tools=[BinPreviewTool(points=p.points, interior_rings=p.interior_rings) for p in b.placed_tools],
+                imported_model=b.imported_model,
             ).model_dump() for b in bins.values() if b.id in project.bin_ids or b.project_id == project.id],
             "geometry_revision": hashlib.sha256(json.dumps([
                 {"bin": bins[bid].model_dump(exclude={"stl_path"}), "smoothing": [

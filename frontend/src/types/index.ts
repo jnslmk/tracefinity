@@ -313,6 +313,19 @@ export interface PlacedTool {
   depth_override?: number | null
 }
 
+/**
+ * Planning-only metadata for a bin whose geometry was uploaded rather than
+ * generated. Dimensions are the uploaded mesh's bounding box in millimetres;
+ * `bin_config` on the bin carries the detected nominal grid and height, which
+ * is a planning approximation and never proof of physical fit.
+ */
+export interface ImportedModelMetadata {
+  width_mm: number
+  depth_mm: number
+  height_mm: number
+  warnings: string[]
+}
+
 export interface BinData {
   id: string
   name: string | null
@@ -322,6 +335,7 @@ export interface BinData {
   text_labels: TextLabel[]
   stl_path: string | null
   created_at: string | null
+  imported_model?: ImportedModelMetadata | null
 }
 
 export interface BinPreviewTool {
@@ -342,6 +356,7 @@ export interface BinSummary {
   height_units: number
   half_grid_base: boolean
   preview_tools: BinPreviewTool[]
+  imported_model?: ImportedModelMetadata | null
 }
 
 export interface ToolEnvelope {

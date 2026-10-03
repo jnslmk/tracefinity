@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import io
 import json
@@ -48,6 +49,7 @@ from app.models.schemas import (
     FingerHole,
     GenerateRequest,
     GenerateResponse,
+    ImportedBinModel,
     PhotoStation,
     PhotoStationCreateRequest,
     PhotoStationListResponse,
@@ -89,6 +91,12 @@ from app.services.geometry import optimal_rotation_angle as _optimal_rotation_an
 from app.services.image_ingest import ImageTooLargeError, ingest_image
 from app.services.image_processor import ImageProcessor
 from app.services.image_service import generate_tool_thumbnail
+from app.services.imported_bins import (
+    MAX_IMPORT_BYTES,
+    StlImportError,
+    process_import,
+    store_import_asset,
+)
 from app.services.photo_checks import check_photo, extract_focal_length_35mm
 from app.services.photo_station_store import PhotoStationStore
 from app.services.polygon_scaler import PolygonScaler, ScaledFingerHole, ScaledPolygon
@@ -191,6 +199,15 @@ def _user_path(user_id: str) -> Path:
     if not result.is_relative_to(settings.storage_path.resolve()):
         raise HTTPException(status_code=400, detail="invalid user path")
     return result
+
+
+def _reject_imported_mutation(bin_data: BinModel) -> None:
+    """Imported geometry is planning-only: config, tools and text are read-only."""
+    if bin_data.imported_model is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="imported bins are read-only; only the name and project can be changed",
+        )
 
 
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif"}
@@ -2050,6 +2067,9 @@ def bin_height_planning(bin_id: str, req: BinUpdateRequest = BinUpdateRequest(),
     bin_data = user_bins.get(bin_id)
     if not bin_data:
         raise HTTPException(status_code=404, detail="bin not found")
+    if bin_data.imported_model is not None:
+        # uploaded geometry cannot be re-cut, so there are no proposals to make
+        return {"assessment": assess_bin(bin_data, user_tools.all(), safety_clearance_mm), "alternatives": []}
     bin_data = bin_data.model_copy(deep=True)
     if req.bin_config is not None:
         bin_data.bin_config = req.bin_config
@@ -2225,6 +2245,7 @@ async def list_bins(request: Request, user_id: str = Depends(get_user_id)):
             height_units=bin_data.bin_config.height_units,
             half_grid_base=bin_data.bin_config.half_grid_base,
             preview_tools=[BinPreviewTool(points=pt.points, interior_rings=pt.interior_rings) for pt in bin_data.placed_tools],
+            imported_model=bin_data.imported_model,
         ))
     summaries.sort(key=lambda b: b.created_at or "", reverse=True)
     return BinListResponse(bins=summaries)
@@ -2260,6 +2281,84 @@ async def create_bin(request: Request, req: CreateBinRequest, user_id: str = Dep
     )
     user_bins.set(bin_id, bin_data)
     add_bin_to_project(project_store, req.project_id, bin_id)
+    return bin_data
+
+
+IMPORT_DIR_NAME = "imports"
+
+
+@router.post("/bins/import", response_model=BinModel)
+async def import_bin(
+    request: Request,
+    file: UploadFile = File(...),
+    name: str | None = Form(None),
+    project_id: str | None = Form(None),
+    user_id: str = Depends(get_user_id),
+):
+    """Import a user STL as a read-only planning bin (mm, Z-up)."""
+    _, _, user_bins = get_stores(user_id)
+    project_store = get_project_store(user_id)
+    if project_id and not project_store.get(project_id):
+        raise HTTPException(status_code=404, detail=f"project {project_id} not found")
+
+    # bound the read before allocating: one byte over the cap is enough to reject
+    content = await file.read(MAX_IMPORT_BYTES + 1)
+    if len(content) > MAX_IMPORT_BYTES:
+        raise HTTPException(status_code=413, detail="STL exceeds the 25 MiB upload limit")
+    try:
+        model = await asyncio.to_thread(process_import, content)
+    except StlImportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    bin_id = str(uuid.uuid4())
+    up = _user_path(user_id)
+    asset_path = up / IMPORT_DIR_NAME / f"{bin_id}.stl"
+    try:
+        await asyncio.to_thread(store_import_asset, asset_path, model.stl_bytes)
+    except OSError:
+        logger.exception("failed to store imported STL for bin %s", bin_id)
+        raise HTTPException(status_code=500, detail="failed to store imported model")
+
+    bin_config = BinConfig(
+        grid_x=model.grid_x,
+        grid_y=model.grid_y,
+        height_units=model.height_units,
+        stacking_lip=model.stacking_lip,
+        half_grid_base=model.half_grid_base,
+    )
+    bin_data = BinModel(
+        id=bin_id,
+        name=(name or "").strip()[:200] or (Path(file.filename or "").stem[:200] or None),
+        project_id=project_id,
+        bin_config=bin_config,
+        imported_model=ImportedBinModel(
+            width_mm=model.width_mm,
+            depth_mm=model.depth_mm,
+            height_mm=model.height_mm,
+            warnings=model.warnings,
+        ),
+        stl_path=_rel(asset_path, up),
+        created_at=_now_iso(),
+    )
+    # linking mutates the live project record before its store write, and the
+    # project may even be deleted during the awaited parse, so snapshot the
+    # link state and restore it if publishing fails
+    project = project_store.get(project_id) if project_id else None
+    prior_bin_ids = list(project.bin_ids) if project is not None else None
+    prior_updated_at = project.updated_at if project is not None else None
+    try:
+        user_bins.set(bin_id, bin_data)
+        add_bin_to_project(project_store, project_id, bin_id)
+    except Exception:
+        if project is not None:
+            project.bin_ids = prior_bin_ids
+            project.updated_at = prior_updated_at
+        try:
+            user_bins.delete(bin_id)
+        except Exception:
+            logger.exception("failed to roll back imported bin %s", bin_id)
+        asset_path.unlink(missing_ok=True)
+        raise
     return bin_data
 
 
@@ -2362,6 +2461,8 @@ async def update_bin(request: Request, bin_id: str, req: BinUpdateRequest, user_
         raise HTTPException(status_code=404, detail="bin not found")
 
     old_project_id = bin_data.project_id
+    if bin_data.imported_model is not None and req.model_fields_set & {"bin_config", "placed_tools", "text_labels"}:
+        _reject_imported_mutation(bin_data)
     if req.name is not None:
         bin_data.name = req.name
     if "project_id" in req.model_fields_set:
@@ -2412,6 +2513,12 @@ def generate_bin_stl(request: Request, bin_id: str, user_id: str = Depends(get_u
     bin_data = user_bins.get(bin_id)
     if not bin_data:
         raise HTTPException(status_code=404, detail="bin not found")
+    if bin_data.imported_model is not None:
+        # the upload is the model: return the stored asset, never regenerate
+        if not bin_data.stl_path or not Path(_abs(bin_data.stl_path)).exists():
+            raise HTTPException(status_code=404, detail="imported model file is missing")
+        url = f"/storage/{bin_data.stl_path}"
+        return GenerateResponse(stl_url=url, stl_urls=[url])
     bin_data = bin_data.model_copy(deep=True)
     sync_placed_tools(bin_data, user_tools)
     if not bin_data.placed_tools:
@@ -2493,6 +2600,9 @@ async def download_bin_stl(request: Request, bin_id: str, user_id: str = Depends
         raise HTTPException(status_code=404, detail="stl not found")
     stl_abs = _abs(bin_data.stl_path)
     if not Path(stl_abs).exists():
+        if bin_data.imported_model is not None:
+            # an upload cannot be regenerated; ask for the file back instead
+            raise HTTPException(status_code=404, detail="imported model file is missing; re-upload the STL to restore it")
         raise HTTPException(status_code=404, detail="stl expired; regenerate the bin")
     return FileResponse(
         stl_abs,

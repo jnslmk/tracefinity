@@ -97,6 +97,13 @@ Reference for AI agents. Check here before suggesting new features or claiming s
 - Bin import (with/without tool reassignment)
 - Filter tool library by project membership
 
+## Imported STL bins
+
+- Upload an existing STL bin for read-only planning: bounding-box dimensions and a nominal grid are detected from the mesh, with warnings for non-standard geometry
+- Upload from the home Bins section or a project's Linked bins section (optionally linked to that project immediately)
+- Read-only geometry: no tools, cutouts or config changes; rename, link/detach, download and delete remain available
+- Detected fit and stacking are always reported as uncertain, never verified
+
 ## Drawer Planning
 
 - Several drawer plans per project, each with its own name and grid
@@ -110,6 +117,7 @@ Reference for AI agents. Check here before suggesting new features or claiming s
 - Per-bin highlight colours
 - Auto arrange (largest bins first) and space usage stats
 - Overlap and out-of-drawer warnings
+- Height layer slider: show every bin base elevation, or one assessed level in millimetres and units; bins spanning a level stay visible
 
 ## Tool Library
 

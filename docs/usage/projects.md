@@ -69,6 +69,18 @@ Click the unlink icon next to a bin in the **Linked bins** section. This removes
 
 Click the delete icon next to a bin to permanently delete it and all associated files.
 
+## Uploaded STL bins
+
+The home **Bins** section and a project's **Linked bins** section both offer **Upload STL**. This adds an existing Gridfinity bin as a read-only planning object, so a drawer that mixes Tracefinity-generated bins with saved ones can still be planned in one place. This is not an outline import: only `.stl` files in millimetres with Z up are accepted, up to 25 MiB, and the geometry is stored unchanged.
+
+Tracefinity measures the uploaded mesh and reports its bounding box next to a detected nominal grid. Width and depth snap to full 42 mm cells or half 21 mm cells within 0.75 mm; height snaps to 7 mm body units, with or without the 4.4 mm stacking lip, within 0.75 mm. The mesh is normalised (centred in X/Y, Z-minimum at 0), matching generated bins, and is never regenerated.
+
+A non-standard dimension is valid: it imports with a warning, planning rounds it up to a conservative nominal footprint, and the reported size stays the measured bounding box. Those figures are planning bounds only, not a claim about the physical part.
+
+Uploading from a project links the bin to it immediately. You can rename it, link or detach it, delete it, and download the stored STL. You cannot add tools or cutouts or change its configuration.
+
+An uploaded bin's interfaces are uncertain. No dimensional fit or stacking is guaranteed, and a stack that joins an imported model is reported as an unverified interface. The stored mesh is kept until you delete the bin; it is not touched by the retention sweep that expires generated exports.
+
 ## Project health check
 
 If there are inconsistencies (orphaned tools, mismatched bin assignments), a health banner appears showing the issues. Common issues:
@@ -126,6 +138,14 @@ Switch between the top-down sketch and a 3D view with the buttons above the canv
 
 The plan saves automatically and is stored with the project.
 
+### Height layers
+
+Once an assessment describes the current arrangement, the **Height layer** slider lists the distinct bin base elevations the plan actually reaches, floor included. Position 0 is **Show all** (the default); each other position pins the view to one assessed base, shown in millimetres and 7 mm units.
+
+A bin spanning the selected level stays visible; one whose top ends at that level is hidden. Filtering changes only what is drawn -- the saved plan is untouched. A hidden bin cannot be selected until you show all levels, and a bin filtered out of view loses its selection. New and dropped bins rest on the floor, so they appear at level 1; dropping or duplicating a bin while a higher level is selected returns the view to **Show all**.
+
+The slider only appears when the assessment matches the current arrangement. If the assessment is still running, failed, or stale, layer selection stays off and says why. The elevations are assessed, conservative values: a nominal 5+3+2 stack reaching 0/35/56 mm is an example, not proof that a loaded stack fits.
+
 ### Closed-lid height and safety clearance
 
 Name a plan for the toolbox or layout variant. Enter usable floor-to-closed-lid
@@ -140,6 +160,14 @@ clearance. Zero preserves old-plan behaviour but is not a manufacturing toleranc
 The gap applies between a tool envelope and an upper bin, and between contents
 and the ceiling.
 
+A bin whose own measured bounding box exceeds the usable container height is a
+known collision. When the excess appears only because a placement rests on an
+uploaded model, the assembled height is a conservative estimate over an unverified
+interface: the plan reports an unresolved estimated clearance instead of claiming a
+proven collision. An exact floor-level bounding box still cannot be dismissed by
+that uncertainty, so a floor bin that genuinely reaches past the ceiling stays a
+known violation.
+
 ### Manual stacks and accessible actions
 
 Select a placed floor bin and choose **Stack on** another placement. Only aligned,
@@ -148,7 +176,11 @@ intact lower stacking lip are supported. Full- and half-grid bases cannot be mix
 Partial-bin interfaces whose support cannot be established are not verified.
 The dropdown checks support on the server; rejected operations leave the saved
 arrangement intact. Upper bins are positioned from the generated mating geometry,
-not from editable Z coordinates or sums of exterior mesh heights.
+not from editable Z coordinates or sums of exterior mesh heights. That verified
+positioning applies only when every member of the stack is a generated Tracefinity
+bin. Any interface that touches an uploaded model -- including a mixed
+generated/imported stack -- is positioned conservatively from the imported
+bounding box and reported as unverified, not as a verified mating datum.
 
 Dragging, rotating or changing **Stack X/Y** moves the complete rooted stack.
 Duplicating one selected bin creates an independent floor placement, not a copy

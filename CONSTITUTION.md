@@ -117,6 +117,15 @@ An arbitrary object does not become in scope because a Gridfinity base can be
 attached to it. Freeform millimetre-sized bins, non-Gridfinity storage systems,
 and generic host-model imports create another geometry product and are out.
 
+One narrow exception is approved for planning: an existing STL intended as a
+Gridfinity bin may be uploaded as a read-only planning object, so a drawer that
+mixes printed bins with saved ones can be planned in one place. It is not an
+outline import, not an editable bin model, and not an independent conversion
+product. The mesh is stored unchanged and its physical interfaces are never
+reported as verified. Tracefinity cannot prove from dimensions alone that an
+uploaded mesh is a real Gridfinity bin; a non-standard measurement is surfaced as
+a visible warning and is not a certification of fit.
+
 Export formats are representations, not new product modes. STL, 3MF, SVG, STEP,
 or another format can be in scope when it represents an allowed Tracefinity
 design. The cost of supporting that representation is a separate decision.
@@ -223,6 +232,7 @@ the full discussion.
 | [#72: freeform bins](https://github.com/tracefinity/tracefinity/pull/72#issuecomment-4702528306) | `OUT OF SCOPE` | Added arbitrary millimetre-sized output and a parallel bin model | The project deliberately changes its Gridfinity-only output boundary |
 | [#134: SVG import](https://github.com/tracefinity/tracefinity/pull/134#issuecomment-4993340069) | `OUT OF SCOPE` | Bypassed raster capture and tracing with authored outlines | Community evidence justifies reconsidering the photographic-input boundary |
 | [#45: project planning](https://github.com/tracefinity/tracefinity/pull/45) | `IN SCOPE` | Planning traced tools across bins and drawers completes the core storage workflow | Not applicable |
+| Uploaded STL planning bins | `IN SCOPE` | A read-only planning object for an intended Gridfinity bin lets one drawer mix printed and saved bins, with non-standard dimensions warned rather than blocked and physical interfaces never verified | The project deliberately supports laying out general models or host geometry, or it claims verified compatibility from a bounding-box measurement alone |
 | [#101: half-grid bins](https://github.com/tracefinity/tracefinity/issues/101) and [#112: partial bins](https://github.com/tracefinity/tracefinity/pull/112) | `IN SCOPE` | Community-compatible extensions keep Gridfinity as the organising model | Not applicable |
 | [#56: backup API](https://github.com/tracefinity/tracefinity/pull/56#issuecomment-4702507666) | `NOT A PRODUCT FEATURE` as proposed | Copying the plain-file storage volume and documenting it solved the need without new UI, API, or state | The platform-level approach becomes unsafe or unreasonably difficult |
 | [#11: Ollama saliency](https://github.com/tracefinity/tracefinity/issues/11#issuecomment-4085938154) | `NOT A PRODUCT FEATURE` as proposed | A general LLM-serving interface was the wrong tool for pixel-level saliency; dedicated local models met the underlying need | A provider offers a technically suitable and well-supported saliency capability |
