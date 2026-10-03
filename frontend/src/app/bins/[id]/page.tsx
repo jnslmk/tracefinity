@@ -557,7 +557,6 @@ export default function BinPage() {
   const insertUrlWithVersion = insertStlUrl && !gridLimitError ? `${insertStlUrl}?v=${stlVersion}` : null
   const binW = config.grid_x * GRID_UNIT
   const binH = config.grid_y * GRID_UNIT
-  const effectiveRimUnits = config.stacking_lip ? config.rim_units : 0
   const hasExports = !gridLimitError && (stlUrl || zipUrl || threemfUrl || insertStlUrl)
 
   return (
@@ -644,16 +643,9 @@ export default function BinPage() {
             </details>
           </div>
 
-          <div className="glass rounded-[10px] px-3 py-3">
-            <h3 className="text-[10px] font-semibold text-text-muted uppercase tracking-[1.5px] mb-2">Dimensions</h3>
-            <div className="text-[11px] text-text-secondary space-y-0.5">
-              <div className="flex justify-between"><span>Width</span><span>{binW} mm</span></div>
-              <div className="flex justify-between"><span>Depth</span><span>{binH} mm</span></div>
-              <div className="flex justify-between"><span>Height</span><span>{(config.height_units * 7 + effectiveRimUnits * 7 + (config.stacking_lip ? 4.4 : 0)).toFixed(1)} mm</span></div>
-            </div>
-          </div>
-          {binData?.project_id && <ProjectSpaceUsage projectId={binData.project_id} binId={binId}
-            savedRevision={savedRevision} pending={draftRevision !== savedRevision || saving || !!saveError} />}
+          <ProjectSpaceUsage projectId={binData?.project_id} binId={binId}
+            config={config} placedTools={placedTools}
+            pending={draftRevision !== savedRevision || saving || !!saveError} />
           <BinHeightPlanner binId={binId} config={config} placedTools={placedTools} onApply={applyHeightProposal}
             onRemove={id => handlePlacedToolsChange(placedTools.filter(tool => tool.id !== id), 'Remove tool')} />
         </div>

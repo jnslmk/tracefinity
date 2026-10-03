@@ -10,42 +10,28 @@ The 2D canvas shows the 42mm Gridfinity grid over both the bin floor and tool
 outlines. Grid lines stay visible when zoomed out and do not block tool selection
 or dragging. Half-grid bases also show lighter, dashed 21mm subdivisions.
 
-### Project space
+### Dimensions and drawer fit
 
-For a bin linked to a project, **Project space** below the bin dimensions shows
-the available width, depth and usable height for every drawer plan. Physical
-millimetre limits take precedence over grid dimensions.
+**Dimensions & fit** combines the bin's width, depth and exterior height with
+each linked drawer's width, depth and usable height. Physical millimetre limits
+take precedence over target grid dimensions. Click a drawer name to open its plan.
 
-Occupancy covers the whole saved drawer plan, including other bins and repeated
-placements, not just the bin being edited. Supported stacks share their root
-footprint rather than counting each member again. **Floor used** is the occupied
-floor grid area inside the drawer divided by its physical area; **Free grid**
-excludes residual edge strips. Floor text and the meter stay neutral regardless
-of fit. When a bin crosses the drawer boundary, the panel explains that occupancy
-counts only the area inside the drawer, not the overhanging footprint.
-The placement count and an explicit note identify bins not yet included in a plan.
+Bin dimension values are green when they fit, red when they exceed a drawer
+limit, and amber when fit is unknown. Width and depth account for a 90° rotation;
+height includes the loaded bin and safety gap. Hover a value for the fit status.
+With multiple drawer plans, each dimension shows the worst result across them:
+an exceeded limit takes precedence over an unknown check. Without a drawer plan,
+the values stay neutral.
 
-Fit is green for **Fits**, red for **Does not fit**, and amber for incomplete
-measurements or unavailable assessments. **Physical issues** and **unresolved
-checks** have separate counts: unknown measurements and unverified checks are not
-known failures, though they can coexist with them. Closed-lid failures for tools,
-inserts and the bin exterior at the same identified placement appear as one
-**Closed-lid height issue**. Different placements (including copies of one bin),
-other failure types and violations without a placement ID remain separate.
-Groups use bin names and, for repeated placements, copy numbers rather than
-internal IDs; unnamed bins still have concise numbered labels.
-Expand the native disclosures to see every original violation message, reported
-ceiling clearance and affected tool measurements. Each height issue compares
-the assessment's usable drawer height with that placement's required loaded
-height and safety gap where available; unknown measurements remain labelled
-unknown, and the panel does not suggest measurement corrections.
+This panel only warns about the bin itself: a footprint that cannot fit in
+either orientation, or a standalone loaded height (including inserts, tools and
+the drawer's safety gap) that exceeds the usable height. A bin that fits after
+rotation is not a size failure. Unknown measurements stay explicitly unknown;
+pending edits and failed assessments never show stale height-fit results.
 
-Use **Inspect / adjust bin placements** to open the saved drawer plan and inspect
-the identified bin placement and its support stack. This is the bin's placement
-in the drawer, not the arrangement of tools inside the bin.
-An occupancy percentage alone does not guarantee fit: bounds, collisions,
-tool thickness and loaded height also matter. Bin edits refresh the assessment
-after saving; pending edits never display an old result as a current fit.
+Saved positions, overlaps, other bins and support-stack elevations are placement
+problems, not bin-size problems. Inspect those in the drawer plan, which retains
+the full fit assessment, occupancy and placement details.
 
 ## Adding tools
 
