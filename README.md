@@ -190,7 +190,13 @@ helm install tracefinity oci://ghcr.io/tracefinity/charts/tracefinity \
 
 ### From Source
 
-Prerequisites: Python 3.11+, Node.js 20+, [pnpm](https://pnpm.io/installation)
+Prerequisites: Python 3.12+, Node.js 20+, [pnpm](https://pnpm.io/installation)
+
+The backend includes the pinned native `packingsolver==0.1.1056` dependency,
+which requires Python 3.12+. Auto-layout defaults to Automatic, running the
+Raster and PackingSolver optimizers locally under a shared 5-second budget.
+See [the API contract](docs/api.md#bins) for solver selection, the 0.5–60-second
+budget range, pinned placements, auto-width, and visible busy/failure responses.
 
 ```bash
 git clone https://github.com/tracefinity/tracefinity

@@ -746,6 +746,7 @@ class PlacedTool(BaseModel):
     finger_holes: list[FingerHole] = []  # mm, bin-space
     interior_rings: list[list[Point]] = []  # mm, bin-space
     rotation: float = 0.0  # degrees, applied on top of library points
+    pinned: bool = False  # excluded from automatic movement, not manual editing
     depth_override: float | None = None  # mm; None = use bin_config.cutout_depth
 
 

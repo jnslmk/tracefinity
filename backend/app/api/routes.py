@@ -13,12 +13,13 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from PIL import Image
-from starlette.requests import Request
 from pydantic import Field
+from starlette.requests import Request
 
 logger = logging.getLogger(__name__)
 
@@ -1516,7 +1517,6 @@ async def download_threemf(request: Request, session_id: str, user_id: str = Dep
 # --- tool library ---
 
 
-@router.get("/tools", response_model=ToolListResponse)
 class OutlinePreviewPolygon(Polygon):
     smoothed: bool = True
     smooth_level: float = Field(default=0.5, ge=0, le=1, allow_inf_nan=False)
@@ -1555,6 +1555,7 @@ def preview_tool_outlines(
     return prepared
 
 
+@router.get("/tools", response_model=ToolListResponse)
 async def list_tools(request: Request, user_id: str = Depends(get_user_id)):
     user_sessions, user_tools, _ = get_stores(user_id)
     all_tools = user_tools.all()
@@ -2401,10 +2402,23 @@ async def import_bin(
     return bin_data
 
 
+class FixedPlacement(BaseModel):
+    tool_id: str
+    placement_id: str | None = Field(default=None, min_length=1)
+    x: float = Field(allow_inf_nan=False)
+    y: float = Field(allow_inf_nan=False)
+    rotation: float = Field(allow_inf_nan=False)
+
+
 class AutoLayoutRequest(BaseModel):
     tool_ids: list[str] = []
+    placement_ids: list[str] | None = None
     clearance: float = 1.0
     bin_config: BinConfig | None = None
+    auto_width: bool = False
+    algorithm: Literal["auto", "raster", "packingsolver"] = "auto"
+    time_budget_seconds: float = Field(default=5.0, ge=0.5, le=60.0, allow_inf_nan=False)
+    fixed_placements: list[FixedPlacement] = Field(default_factory=list)
 
 
 class AutoLayoutResponse(BaseModel):
@@ -2412,82 +2426,111 @@ class AutoLayoutResponse(BaseModel):
     bounds: tuple[float, float, float, float]
     efficiency: float
     unfitted_tool_ids: list[str] = []
+    unfitted_placement_ids: list[str] = Field(default_factory=list)
+    grid_x: float | None = None
 
 
 @router.post("/bins/auto-layout", response_model=AutoLayoutResponse)
 def auto_layout_bin(req: AutoLayoutRequest, user_id: str = Depends(get_user_id)):
     """Compute an auto-layout for the given tools without creating a bin."""
-    from shapely.geometry import Polygon as ShapelyPolygon
+    deadline = time.monotonic() + req.time_budget_seconds
+    if not math.isfinite(req.clearance) or req.clearance < 0:
+        raise HTTPException(status_code=400, detail="tool padding must be finite and non-negative")
+    if req.auto_width and req.bin_config is None:
+        raise HTTPException(status_code=400, detail="auto width requires bin_config with a fixed grid_y")
+    if req.fixed_placements and req.bin_config is None:
+        raise HTTPException(status_code=400, detail="pinned placements require bin_config to validate the usable interior")
+    instance_ids = req.placement_ids if req.placement_ids is not None else req.tool_ids
+    if req.placement_ids is not None and (
+        len(instance_ids) != len(req.tool_ids)
+        or any(not identity.strip() for identity in instance_ids)
+        or len(set(instance_ids)) != len(instance_ids)
+    ):
+        raise HTTPException(status_code=400, detail="placement_ids must contain one unique nonempty string per tool_ids entry")
+    library_ids = dict(zip(instance_ids, req.tool_ids))
+    pins_by_id = {}
+    for pin in req.fixed_placements:
+        identity = pin.placement_id if req.placement_ids is not None else pin.tool_id
+        if req.placement_ids is None and pin.placement_id is not None:
+            raise HTTPException(status_code=400, detail="pinned placement_id requires placement_ids")
+        if identity not in library_ids or library_ids[identity] != pin.tool_id:
+            raise HTTPException(status_code=400, detail="each pin must identify a requested placement and its matching tool_id")
+        if identity in pins_by_id:
+            raise HTTPException(status_code=400, detail="each pinned placement must be specified only once")
+        pins_by_id[identity] = pin
+    pinned_ids = set(pins_by_id)
+    if req.bin_config and any(not math.isfinite(value) for value in (
+        req.bin_config.wall_thickness, req.bin_config.cutout_clearance,
+    )):
+        raise HTTPException(status_code=400, detail="wall thickness and cutout clearance must be finite")
 
-    from app.services.auto_layout import auto_layout, layout_bounds, layout_efficiency
-
-    _, user_tools, _ = get_stores(user_id)
-
-    tools = []
-    for tid in req.tool_ids:
-        tool = user_tools.get(tid)
-        if not tool:
-            raise HTTPException(status_code=404, detail=f"tool {tid} not found")
-        if len(tool.points) < 3:
-            continue  # degenerate outline cannot form a polygon
-        points = [(p.x, p.y) for p in tool.points]
-        tools.append({
-            "id": tid,
-            "name": tool.name,
-            "polygon": ShapelyPolygon(points),
-        })
-
-    # Sort by height descending for better packing of long thin tools
-    tools.sort(key=lambda t: t["polygon"].bounds[3] - t["polygon"].bounds[1], reverse=True)
-
-    # pack into the usable interior: outlines outside the interior clip rect
-    # cannot seat in their pocket and the height assessment refuses to verify
-    offset_x = offset_y = 0.0
-    bin_width = bin_depth = None
-    if req.bin_config:
-        from app.services.stl_generator_manifold import _interior_clip_rect
-
-        rect = _interior_clip_rect(req.bin_config)
-        bin_width = rect.bounds[2] - rect.bounds[0]
-        bin_depth = rect.bounds[3] - rect.bounds[1]
-        offset_x = (req.bin_config.grid_x * GF_GRID - bin_width) / 2
-        offset_y = (req.bin_config.grid_y * GF_GRID - bin_depth) / 2
-
-    placed = auto_layout(
-        tools,
-        clearance=req.clearance,
-        bin_width=bin_width,
-        bin_depth=bin_depth,
+    from app.services.auto_layout import (
+        LayoutBusyError,
+        LayoutEngineError,
+        LayoutInputError,
+        auto_layout,
+        layout_bounds,
+        layout_efficiency,
     )
+    from app.services.auto_layout_geometry import LayoutGeometryError
+
+    try:
+        placed = auto_layout(
+            [],
+            clearance=req.clearance,
+            bin_width=None,
+            bin_depth=None,
+            algorithm=req.algorithm,
+            time_budget_seconds=req.time_budget_seconds,
+            auto_width=req.auto_width,
+            _deadline=deadline,
+            _stored_request={"storage_path": str((settings.storage_path / user_id).absolute()),
+                             "request": req},
+        )
+    except LayoutInputError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except LayoutGeometryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (LayoutBusyError, LayoutEngineError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     if not placed:
         raise HTTPException(status_code=400, detail="no tools to layout")
-
-    placements = []
-    for p in placed:
-        placements.append({
-            "tool_id": p.tool_id,
-            "name": p.name,
-            "x": p.x + offset_x,
-            "y": p.y + offset_y,
-            "rotation": p.rotation,
-        })
+    context = placed[0].context
+    bin_depth = context["depth"]
+    offset_x, offset_y = context["offset_x"], context["offset_y"]
+    width_cap = context["width_cap"]
 
     bounds = layout_bounds(placed)
-    fitted_ids = set()
-    for p in placed:
-        if p.polygon.is_empty or p.polygon.area <= 0:
-            continue
-        minx, miny, maxx, maxy = p.polygon.bounds
-        if bin_width is not None and bin_depth is not None:
-            if minx < -1e-6 or miny < -1e-6 or maxx > bin_width + 1e-6 or maxy > bin_depth + 1e-6:
-                continue
-        fitted_ids.add(p.tool_id)
+    fitted_ids = {p.tool_id for p in placed if p.fitted}
+    computed_grid_x = None
+    if req.auto_width:
+        fitted = [p for p in placed if p.tool_id in fitted_ids]
+        left, top, right, bottom = layout_bounds(fitted)
+        step = 0.5 if req.bin_config.half_grid_base else 1.0
+        computed_grid_x = min(width_cap, max(1.0, math.ceil(
+            ((right if pinned_ids else right - left) + 2 * offset_x - 1e-6) / (GF_GRID * step)
+        ) * step))
+        if not pinned_ids:
+            # Without anchors, center only after choosing the final width.
+            offset_x = (computed_grid_x * GF_GRID - right - left) / 2
+            offset_y += (bin_depth - bottom - top) / 2
+    placements = [{
+        "tool_id": library_ids[p.tool_id],
+        **({"placement_id": p.tool_id} if req.placement_ids is not None else {}),
+        "name": p.name,
+        "x": pins_by_id[p.tool_id].x if p.tool_id in pins_by_id else p.x + offset_x,
+        "y": pins_by_id[p.tool_id].y if p.tool_id in pins_by_id else p.y + offset_y,
+        "rotation": p.rotation,
+    } for p in placed]
     return AutoLayoutResponse(
         placements=placements,
         bounds=(bounds[0] + offset_x, bounds[1] + offset_y, bounds[2] + offset_x, bounds[3] + offset_y),
         efficiency=layout_efficiency(placed),
-        unfitted_tool_ids=[tid for tid in req.tool_ids if tid not in fitted_ids],
+        unfitted_tool_ids=[tid for identity, tid in zip(instance_ids, req.tool_ids) if identity not in fitted_ids],
+        unfitted_placement_ids=[identity for identity in instance_ids if identity not in fitted_ids]
+        if req.placement_ids is not None else [],
+        grid_x=computed_grid_x,
     )
 
 

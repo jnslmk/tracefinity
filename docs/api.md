@@ -97,9 +97,11 @@ the normal authentication rules and shares the SVG/STL preparation pipeline.
 - `GET /api/bins/{id}/height-planning?safety_clearance_mm=0` - current loaded-bin assessment and inspectable deeper-pocket / raised-rim alternatives
 - `POST /api/bins/{id}/height-planning?safety_clearance_mm=0` - assess an unsaved `BinUpdateRequest` draft without persisting it
 
-Auto-layout accepts `{tool_ids, clearance, bin_config?}` and returns
-`{placements, bounds, efficiency, unfitted_tool_ids}`. Placement `x`/`y` is the
-minimum corner of the final rotated outline, in millimetres. With `bin_config`,
+Auto-layout accepts `{tool_ids, placement_ids?, clearance, bin_config?, auto_width?, fixed_placements?, algorithm?, time_budget_seconds?}` and returns
+`{placements, bounds, efficiency, unfitted_tool_ids, unfitted_placement_ids, grid_x}`.
+`tool_ids` defaults to `[]`; `placement_ids` and `bin_config` default to `null`.
+Placement `x`/`y` is the minimum corner of the final rotated original outline in
+**bin coordinates**, in millimetres. With `bin_config`,
 `unfitted_tool_ids` contains requested library tool IDs not placed or whose final
 outlines extend beyond the usable interior (wall/stacking-lip inset), with a
 1e-6 mm containment tolerance. Degenerate outlines are also reported. Without a
@@ -107,7 +109,85 @@ target configuration, only unplaced or degenerate tools are reported.
 Overflow placements are still returned: this warning means the arranger did not
 find a fitting layout, not that fitting is mathematically impossible. Increase
 the grid size or remove tools and try again. Missing tools still return 404;
-when no tools can be placed, the endpoint still returns 400.
+empty requests and requests containing only degenerate outlines return 400.
+
+For repeated copies of a library tool, send `placement_ids` parallel to `tool_ids`.
+It must contain exactly one unique, nonempty string instance ID per requested
+tool (invalid identities return `400`; non-string IDs return `422`). Each returned
+placement then includes that `placement_id` alongside its library `tool_id`.
+Fit is tracked independently per instance: `unfitted_tool_ids` still contains
+library IDs, once per unfitted requested copy, even when another copy fits.
+`unfitted_placement_ids` identifies those exact instances, including overflow
+diagnostic rows still returned in `placements`; placement presence does not mean
+the instance fits. This field is `[]` for legacy requests without `placement_ids`.
+Omitting `placement_ids` preserves the legacy unique-library-tool behavior.
+
+`auto_width` defaults to `false`. When `true`, `bin_config` is required (400 if
+missing): `grid_y` is fixed and the supplied `grid_x` is replaced by the computed
+width. The search prioritises fitted tool count, then occupied width. Returned
+`grid_x` snaps to full grid units, or half units with `half_grid_base`, within
+the 25u/100-cell footprint limits. Its usable interior includes the actual
+wall/stacking-lip inset plus `cutout_clearance`. Without pins, fitted tools are
+centred in the resulting bin. With pins, the anchored rightmost fitted extent
+plus margins determines width; unused space left of an anchor is not removed,
+and neither X nor Y is recentered. Overflow tools remain explicit diagnostics.
+`grid_x` is `null` when `auto_width` is false.
+
+`clearance` is finite, non-negative tool padding in millimetres (default `1.0`):
+the minimum edge-to-edge gap between the raw tool outlines, not a per-tool
+offset or the bin's `cutout_clearance` fit allowance. Zero allows touching
+outlines without overlap. Negative or non-finite spacing returns 400.
+
+`algorithm` selects `"auto"` (default), `"raster"`, or `"packingsolver"`.
+`time_budget_seconds` is a finite number from `0.5` to `60`, inclusive (default
+`5.0`). Invalid algorithm or budget values return 422.
+
+`"auto"` (Automatic) concurrently runs the real Raster and native PackingSolver
+optimizers in isolated, owned worker processes. A single absolute deadline is
+established at handler entry; its shared budget covers worker startup and
+imports, canonical tool/bin preparation, search, and original-geometry
+validation inside those workers. It compares validated incumbents, prioritising
+fitted tool count, then smaller layout bounding-box area for ordinary layouts
+(occupied width for `auto_width`). On timeout it keeps the best validated
+incumbent found so far; it does not prove optimality. Explicit `"raster"` or
+`"packingsolver"` runs only the selected optimizer under the same deadline.
+
+The bundled Next.js rewrite proxy allows 65 seconds so a 60-second budget can
+return after worker cleanup. Other reverse proxies need a compatible response
+timeout.
+
+Each backend process admits one active layout request and at most two optimizer
+children; busy requests are rejected rather than queued. Busy requests, an
+unavailable or failed selected explicit engine, failure or unavailability of
+both Automatic engines, or expiration before any safe incumbent return 503.
+One healthy Automatic engine can still return its valid result when the other fails.
+Deadline termination after a safe incumbent is not an engine failure.
+Unrecoverable geometry arithmetic returns 400 rather than altered or collapsed
+outlines.
+
+`fixed_placements` defaults to `[]`. Each entry is
+`{tool_id, placement_id?, x, y, rotation}` with finite numeric coordinates and angle (degrees).
+When `placement_ids` is supplied, every pin must supply a matching `placement_id`
+and its corresponding library `tool_id`; unknown, mismatched, or missing pin
+identities return `400`. Without `placement_ids`, pins use `tool_id` and must not
+supply `placement_id`. It anchors that requested instance at its final rotated-outline minimum
+corner, in the same bin coordinates returned by the endpoint. Angles, including
+non-cardinal angles and whole turns, and fractional corners are preserved.
+Pins require `bin_config`; their original outlines must fit the usable interior
+and meet the same edge-to-edge `clearance` as other tools. Each instance can be
+pinned once and must be requested. Duplicate, unrequested, degenerate,
+outside, overlapping, or too-close pins return an actionable `400`; missing
+library tools return `404`, and non-finite pin coordinates/angles return `422`.
+Invalid pins are never relocated. All-pinned requests still validate and return
+the supplied poses unchanged. Both optimizers pack movable tools around fixed
+outlines, including usable holes; overflow IDs retain their normal meaning.
+No layout with pins is group-centered.
+
+Saved bin `placed_tools` add `pinned: boolean` (default `false` for old data).
+`PUT /api/bins/{id}` persists it and bin reads/library synchronization preserve
+it. This is an automatic-placement constraint, not a manual-edit lock: clients
+may still drag or rotate pinned tools and submit their new pose on the next
+auto-layout request.
 
 `thickness_mm` is the maximum measured resting thickness in the scanned orientation.
 It is finite and strictly positive, or `null` for unknown. A tool update that omits
@@ -121,6 +201,11 @@ cutout override changes, external height and clearance, or an explanation when n
 supported configuration fits. These endpoints never change saved geometry.
 Apply a chosen alternative with the existing `PUT /api/bins/{id}` and then
 `POST /api/bins/{id}/generate`. Body and rim limits remain 20 units each.
+
+Assessments and height proposals use bounded, in-memory caches keyed by their
+physical inputs and referenced tools. Identical planning requests reuse the
+computed result; changes to measurements, smoothing, placements, labels, or
+configuration trigger reassessment. Cache entries are never persisted.
 
 `POST /api/bins/import` is multipart (`file`, optional `name`, optional
 `project_id`) and is the way to create a planning-only bin. `file` is an STL no
@@ -210,11 +295,6 @@ Tools in bins merely linked to the project do not complete this plan.
 `geometry_revision` is a transient preview invalidation key, not a stored fit cache.
 Only user inputs and relationships persist; assessments use current tools/bins.
 Old floor-only records still load unchanged and missing physical data remains explicit.
-
-Assessments and height proposals use bounded, in-memory caches keyed by their
-physical inputs and referenced tools. Identical planning requests reuse the
-computed result; changes to measurements, smoothing, placements, labels, or
-configuration trigger reassessment. Cache entries are never persisted.
 
 
 A project holds any number of drawer plans in `sketches`, each `{id, name, target_grid_x, target_grid_y, bin_layout, created_at, updated_at}` with its own grid of 1-40 units. Records written before multiple plans existed are migrated on load: their project-level grid and layout become a single sketch. `bin_layout` is a list of `{id, bin_id, x, y, rotation, color}` placements on the project drawer grid. `x`/`y` are gridfinity units from the top-left in 0.5 steps, `rotation` is 0, 90, 180 or 270, and `color` is an optional `#rrggbb` highlight. Every placement must reference a bin linked to the project; the same bin may be placed several times, so placement ids must be unique (the server generates one when omitted). Placements are dropped automatically when a bin is detached or deleted. `GET /api/bins` reports `grid_x`, `grid_y`, `height_units`, `half_grid_base` and `preview_tools` so a drawer plan can draw bin footprints, their contents and the snap step each bin allows.

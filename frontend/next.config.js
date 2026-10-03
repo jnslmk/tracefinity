@@ -15,6 +15,10 @@ const nextConfig = {
     ],
   },
   devIndicators: false,
+  experimental: {
+    // Layout budgets reach 60s; leave room for bounded worker cleanup.
+    proxyTimeout: 65_000,
+  },
   async rewrites() {
     // proxy api and storage requests to backend (for single-container docker)
     const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000'
