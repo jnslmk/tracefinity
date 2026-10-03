@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+from copy import copy, deepcopy
 
 from app.models.schemas import BinPreviewTool, BinSummary, GenerateRequest
 from app.services.bin_service import sync_placed_tools
@@ -56,6 +57,32 @@ def generation_polygons(bin_data, tools, prepare=True):
 
 _ASSESS_CACHE: dict[str, dict] = {}
 _ASSESS_CACHE_LIMIT = 32
+_PROPOSAL_CACHE: dict[str, dict] = {}
+
+
+def _planning_key(bin_data, tools, gap=0, upper_config=None, relative_rotation=0):
+    # Only placed geometry and referenced measurements affect physical planning.
+    content = {
+        "bin": bin_data.model_dump(include={"bin_config", "placed_tools", "text_labels", "imported_model"}),
+        "tools": {
+            tool_id: tools[tool_id].model_dump(include={"name", "thickness_mm", "smoothed", "smooth_level"})
+            for tool_id in sorted({placed.tool_id for placed in bin_data.placed_tools})
+            if tool_id in tools
+        },
+        "gap": gap,
+        "upper": upper_config.model_dump() if upper_config else None,
+        "rotation": relative_rotation,
+    }
+    return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _cache_result(cache, key, result):
+    # ponytail: bounded FIFO; independent whole-proposal entries outlive candidate
+    # eviction, and copies keep inspectable responses private to each caller.
+    if key not in cache and len(cache) >= _ASSESS_CACHE_LIMIT:
+        cache.pop(next(iter(cache)))
+    cache[key] = deepcopy(result)
+    return result
 
 
 def imported_assessment(bin_data):
@@ -82,21 +109,12 @@ def imported_assessment(bin_data):
 
 
 def assess_bin(bin_data, tools, gap=0, upper_config=None, relative_rotation=0, prepared=None):
-    # ponytail: ~0.5s per call and a pure function of its inputs; page reopens,
-    # window-focus replans and duplicate fires hit this instead of re-verifying
-    key = hashlib.sha256(json.dumps([
-        {"bin": bin_data.model_dump(), "gap": gap, "rotation": relative_rotation,
-         "upper": upper_config.model_dump() if upper_config else None,
-         "tools": {tid: tool.model_dump() for tid, tool in sorted(tools.items())}},
-    ], sort_keys=True).encode()).hexdigest()
+    key = _planning_key(bin_data, tools, gap, upper_config, relative_rotation)
     cached = _ASSESS_CACHE.get(key)
     if cached is not None:
-        return cached
+        return deepcopy(cached)
     result = _assess_bin(bin_data, tools, gap, upper_config, relative_rotation, prepared)
-    if len(_ASSESS_CACHE) >= _ASSESS_CACHE_LIMIT:
-        _ASSESS_CACHE.clear()  # ponytail: crude bound, entries are content-keyed so eviction only costs recomputation
-    _ASSESS_CACHE[key] = result
-    return result
+    return _cache_result(_ASSESS_CACHE, key, result)
 
 
 def _assess_bin(bin_data, tools, gap=0, upper_config=None, relative_rotation=0, prepared=None):
@@ -106,8 +124,16 @@ def _assess_bin(bin_data, tools, gap=0, upper_config=None, relative_rotation=0, 
     request = GenerateRequest.model_validate({
         **config.model_dump(), "text_labels": [label.model_dump() for label in config.text_labels + bin_data.text_labels],
     })
+    if prepared is None:
+        prepared = generation_polygons(bin_data, tools)
+    else:
+        # Shape preparation is depth-independent. Never mutate shared prepared
+        # polygons when trying a candidate with different pocket overrides.
+        prepared = [copy(polygon) for polygon in prepared]
+        for polygon, placed in zip(prepared, bin_data.placed_tools):
+            polygon.depth_override = placed.depth_override
     geometry = assess_printed_bin(
-        generation_polygons(bin_data, tools) if prepared is None else prepared,
+        prepared,
         generation_polygons(bin_data, tools, prepare=False), request,
         GenerateRequest.model_validate(upper_config.model_dump()) if upper_config else None, relative_rotation,
     )
@@ -158,6 +184,10 @@ def _assess_bin(bin_data, tools, gap=0, upper_config=None, relative_rotation=0, 
 
 
 def height_proposals(bin_data, tools, gap=0):
+    key = _planning_key(bin_data, tools, gap)
+    cached = _PROPOSAL_CACHE.get(key)
+    if cached is not None:
+        return deepcopy(cached)
     prepared = generation_polygons(bin_data, tools)
     current = assess_bin(bin_data, tools, gap, prepared=prepared)
     alternatives = []
@@ -206,8 +236,6 @@ def height_proposals(bin_data, tools, gap=0):
                                     placed.depth_override = depth
                     if candidate.bin_config.cutout_depth > 200 or any(p.depth_override is not None and p.depth_override > 200 for p in candidate.placed_tools):
                         continue
-                    for polygon, placed in zip(prepared, candidate.placed_tools):
-                        polygon.depth_override = placed.depth_override
                     result = assess_bin(candidate, tools, gap, prepared=prepared)
                     mating_drop = units * 7 - result["stack_increment_mm"]
                     if strategy == "deeper_pockets" and mating_drop > 1e-7 and result["violations"]:
@@ -221,8 +249,6 @@ def height_proposals(bin_data, tools, gap=0):
                                     changes.append({"id": placed.id, "from_mm": original.depth_override, "to_mm": placed.depth_override})
                         if candidate.bin_config.cutout_depth > 200 or any(p.depth_override is not None and p.depth_override > 200 for p in candidate.placed_tools):
                             continue
-                        for polygon, placed in zip(prepared, candidate.placed_tools):
-                            polygon.depth_override = placed.depth_override
                         result = assess_bin(candidate, tools, gap, prepared=prepared)
                     if not result["violations"]:
                         candidates.append((result["external_height_mm"], candidate, result, changes))
@@ -239,7 +265,7 @@ def height_proposals(bin_data, tools, gap=0):
         else:
             alternatives.append({"strategy": strategy, "complete": False, "bin_config": None,
                                  "reason": "Fix unresolved pocket-floor seating before proposing height" if current["seating_errors"] else "No measured tools" if not measured else "No fit within 20u body / 20u rim and supported intact stacking interfaces"})
-    return {"assessment": current, "alternatives": alternatives}
+    return _cache_result(_PROPOSAL_CACHE, key, {"assessment": current, "alternatives": alternatives})
 
 
 def drawer_point(point, placement, config):

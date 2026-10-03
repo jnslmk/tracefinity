@@ -202,6 +202,11 @@ Tools in bins merely linked to the project do not complete this plan.
 Only user inputs and relationships persist; assessments use current tools/bins.
 Old floor-only records still load unchanged and missing physical data remains explicit.
 
+Assessments and height proposals use bounded, in-memory caches keyed by their
+physical inputs and referenced tools. Identical planning requests reuse the
+computed result; changes to measurements, smoothing, placements, labels, or
+configuration trigger reassessment. Cache entries are never persisted.
+
 
 A project holds any number of drawer plans in `sketches`, each `{id, name, target_grid_x, target_grid_y, bin_layout, created_at, updated_at}` with its own grid of 1-40 units. Records written before multiple plans existed are migrated on load: their project-level grid and layout become a single sketch. `bin_layout` is a list of `{id, bin_id, x, y, rotation, color}` placements on the project drawer grid. `x`/`y` are gridfinity units from the top-left in 0.5 steps, `rotation` is 0, 90, 180 or 270, and `color` is an optional `#rrggbb` highlight. Every placement must reference a bin linked to the project; the same bin may be placed several times, so placement ids must be unique (the server generates one when omitted). Placements are dropped automatically when a bin is detached or deleted. `GET /api/bins` reports `grid_x`, `grid_y`, `height_units`, `half_grid_base` and `preview_tools` so a drawer plan can draw bin footprints, their contents and the snap step each bin allows.
 
