@@ -4,56 +4,59 @@ import { MAX_HISTORY } from '@/lib/constants'
 export function useHistory<T>(
   initial: T,
   onChange: (value: T) => void,
-  maxEntries: number = MAX_HISTORY
+  maxEntries: number = MAX_HISTORY,
+  { enabled = true }: { enabled?: boolean } = {}
 ): {
   set: (value: T) => void
   undo: () => void
   redo: () => void
+  reset: (value: T) => void
+  entries: T[]
+  index: number
   canUndo: boolean
   canRedo: boolean
 } {
-  const [entries, setEntries] = useState<T[]>(() => [JSON.parse(JSON.stringify(initial))])
-  const [index, setIndex] = useState(0)
-  const isUndoRedoRef = useRef(false)
+  const [history, setHistory] = useState(() => ({ entries: [structuredClone(initial)], index: 0 }))
+  // Commands share the latest snapshot even when React batches several actions.
+  const historyRef = useRef(history)
   const onChangeRef = useRef(onChange)
-  onChangeRef.current = onChange
+  useEffect(() => { onChangeRef.current = onChange }, [onChange])
 
-  const canUndo = index > 0
-  const canRedo = index < entries.length - 1
+  const updateHistory = useCallback((next: typeof history) => {
+    historyRef.current = next
+    setHistory(next)
+  }, [])
 
   const set = useCallback((value: T) => {
-    if (isUndoRedoRef.current) {
-      isUndoRedoRef.current = false
-      return
-    }
-    setEntries(prev => {
-      const next = prev.slice(0, index + 1)
-      next.push(JSON.parse(JSON.stringify(value)))
-      if (next.length > maxEntries) next.shift()
-      return next
-    })
-    setIndex(prev => Math.min(prev + 1, maxEntries - 1))
-  }, [index, maxEntries])
+    const { entries, index } = historyRef.current
+    const next = [...entries.slice(0, index + 1), structuredClone(value)].slice(-Math.max(1, maxEntries))
+    updateHistory({ entries: next, index: next.length - 1 })
+  }, [maxEntries, updateHistory])
+
+  const reset = useCallback((value: T) => {
+    updateHistory({ entries: [structuredClone(value)], index: 0 })
+  }, [updateHistory])
 
   const undo = useCallback(() => {
-    if (!canUndo) return
-    isUndoRedoRef.current = true
-    const newIdx = index - 1
-    setIndex(newIdx)
-    onChangeRef.current(JSON.parse(JSON.stringify(entries[newIdx])))
-  }, [canUndo, index, entries])
+    const { entries, index } = historyRef.current
+    if (!enabled || index === 0) return
+    updateHistory({ entries, index: index - 1 })
+    onChangeRef.current(structuredClone(entries[index - 1]))
+  }, [enabled, updateHistory])
 
   const redo = useCallback(() => {
-    if (!canRedo) return
-    isUndoRedoRef.current = true
-    const newIdx = index + 1
-    setIndex(newIdx)
-    onChangeRef.current(JSON.parse(JSON.stringify(entries[newIdx])))
-  }, [canRedo, index, entries])
+    const { entries, index } = historyRef.current
+    if (!enabled || index === entries.length - 1) return
+    updateHistory({ entries, index: index + 1 })
+    onChangeRef.current(structuredClone(entries[index + 1]))
+  }, [enabled, updateHistory])
 
   useEffect(() => {
+    if (!enabled) return
     function handleKeyDown(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+      if (e.defaultPrevented || e.altKey) return
+      if (e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault()
         if (e.shiftKey) redo()
         else undo()
@@ -61,7 +64,13 @@ export function useHistory<T>(
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [undo, redo])
+  }, [enabled, undo, redo])
 
-  return { set, undo, redo, canUndo, canRedo }
+  return {
+    set, undo, redo, reset,
+    entries: history.entries,
+    index: history.index,
+    canUndo: history.index > 0,
+    canRedo: history.index < history.entries.length - 1,
+  }
 }
