@@ -20,11 +20,29 @@ Occupancy covers the whole saved drawer plan, including other bins and repeated
 placements, not just the bin being edited. Supported stacks share their root
 footprint rather than counting each member again. **Floor used** is the occupied
 floor grid area inside the drawer divided by its physical area; **Free grid**
-excludes residual edge strips. The placement count and an explicit note identify
-bins that are not yet included in a plan.
+excludes residual edge strips. Floor text and the meter stay neutral regardless
+of fit. When a bin crosses the drawer boundary, the panel explains that occupancy
+counts only the area inside the drawer, not the overhanging footprint.
+The placement count and an explicit note identify bins not yet included in a plan.
 
 Fit is green for **Fits**, red for **Does not fit**, and amber for incomplete
-measurements or unavailable assessments. Expand the fit issues for details.
+measurements or unavailable assessments. **Physical issues** and **unresolved
+checks** have separate counts: unknown measurements and unverified checks are not
+known failures, though they can coexist with them. Closed-lid failures for tools,
+inserts and the bin exterior at the same identified placement appear as one
+**Closed-lid height issue**. Different placements (including copies of one bin),
+other failure types and violations without a placement ID remain separate.
+Groups use bin names and, for repeated placements, copy numbers rather than
+internal IDs; unnamed bins still have concise numbered labels.
+Expand the native disclosures to see every original violation message, reported
+ceiling clearance and affected tool measurements. Each height issue compares
+the assessment's usable drawer height with that placement's required loaded
+height and safety gap where available; unknown measurements remain labelled
+unknown, and the panel does not suggest measurement corrections.
+
+Use **Inspect / adjust bin placements** to open the saved drawer plan and inspect
+the identified bin placement and its support stack. This is the bin's placement
+in the drawer, not the arrangement of tools inside the bin.
 An occupancy percentage alone does not guarantee fit: bounds, collisions,
 tool thickness and loaded height also matter. Bin edits refresh the assessment
 after saving; pending edits never display an old result as a current fit.
