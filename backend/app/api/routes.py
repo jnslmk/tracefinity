@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from PIL import Image
 from starlette.requests import Request
+from pydantic import Field
 
 logger = logging.getLogger(__name__)
 
@@ -1516,6 +1517,44 @@ async def download_threemf(request: Request, session_id: str, user_id: str = Dep
 
 
 @router.get("/tools", response_model=ToolListResponse)
+class OutlinePreviewPolygon(Polygon):
+    smoothed: bool = True
+    smooth_level: float = Field(default=0.5, ge=0, le=1, allow_inf_nan=False)
+
+
+@router.post("/tools/preview-outline", response_model=list[Polygon])
+def preview_tool_outlines(
+    outlines: list[OutlinePreviewPolygon], user_id: str = Depends(get_user_id),
+):
+    """Shared zero-clearance contours for unsaved tool and bin previews."""
+    if len(outlines) > 100 or sum(
+        len(outline.points) + sum(map(len, outline.interior_rings))
+        for outline in outlines
+    ) > 100_000:
+        raise HTTPException(status_code=422, detail="Too many outline vertices")
+    prepared = []
+    for outline in outlines:
+        if len(outline.points) < 3 or any(len(ring) < 3 for ring in outline.interior_rings):
+            raise HTTPException(status_code=422, detail="Outline rings need at least three points")
+        polygon = ScaledPolygon(
+            outline.id, [(p.x, p.y) for p in outline.points], outline.label,
+            interior_rings_mm=[
+                [(p.x, p.y) for p in ring] for ring in outline.interior_rings
+            ],
+        )
+        contour = polygon_scaler.prepare_for_generation(
+            polygon, 0.0, outline.smoothed, outline.smooth_level,
+        )
+        prepared.append(outline.model_copy(update={
+            "points": [Point(x=x, y=y) for x, y in contour.points_mm],
+            "interior_rings": [
+                [Point(x=x, y=y) for x, y in ring]
+                for ring in contour.interior_rings_mm
+            ],
+        }))
+    return prepared
+
+
 async def list_tools(request: Request, user_id: str = Depends(get_user_id)):
     user_sessions, user_tools, _ = get_stores(user_id)
     all_tools = user_tools.all()

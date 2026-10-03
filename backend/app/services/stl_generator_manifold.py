@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 from app.constants import GF_GRID
 
 # Bump when geometry changes so saved previews and exports regenerate.
-STL_GEOMETRY_VERSION = 3
+STL_GEOMETRY_VERSION = 5
 
 GF_HALF_GRID = GF_GRID / 2  # 21mm
 GF_HEIGHT_UNIT = 7.0
@@ -1391,22 +1391,21 @@ def _shrink_rings(
 # ── export helpers ────────────────────────────────────────────────────────────
 
 def _manifold_to_trimesh(m):
+    import manifold3d as mf
     import trimesh
 
-    mesh = m.to_mesh()
-    verts = mesh.vert_properties[:, :3].astype(np.float64)
-    faces = mesh.tri_verts.astype(np.int64)
-    tm = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-    # Merge near-duplicate vertices before dropping degenerate faces at boolean
-    # seams. Trimesh groups vertices by coordinates rounded to this precision;
-    # three decimal places welds the observed seam gaps on affected exports.
-    # The 0.001mm coordinate grid is far below FDM print resolution.
-    tm.merge_vertices(digits_vertex=3)
-    # drop zero-area faces, then clean up orphaned vertices
-    mask = tm.nondegenerate_faces()
-    tm.update_faces(mask)
-    tm.remove_unreferenced_vertices()
-    return tm
+    # STL stores float32 coordinates. Rebuild at that precision so Manifold
+    # collapses quantized slivers without tearing their neighboring triangles.
+    # Coordinate-grid welding followed by face deletion breaks dense pockets.
+    printable = mf.Manifold(m.to_mesh())
+    if printable.status() != mf.Error.NoError:
+        raise ValueError("Mesh cannot preserve manifold topology at STL precision")
+    mesh = printable.to_mesh()
+    return trimesh.Trimesh(
+        vertices=mesh.vert_properties[:, :3].astype(np.float64),
+        faces=mesh.tri_verts.astype(np.int64),
+        process=False,
+    )
 
 
 def _export_stl(m, path: str) -> None:

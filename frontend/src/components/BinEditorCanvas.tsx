@@ -2,9 +2,10 @@
 
 import { RefObject } from 'react'
 import type { PlacedTool, TextLabel } from '@/types'
-import { polygonPathData, smoothPathData, simplifyPolygon, smoothEpsilon } from '@/lib/svg'
+import { polygonPathData } from '@/lib/svg'
 import { GRID_UNIT, DISPLAY_SCALE } from '@/lib/constants'
 import { CutoutOverlay } from '@/components/CutoutOverlay'
+import { useOutlinePreview } from '@/hooks/useOutlinePreview'
 
 type Tool = 'select' | 'text'
 
@@ -106,10 +107,23 @@ export function BinEditorCanvas({
   onPendingLabelKeyDown,
   onPendingLabelBlur,
 }: Props) {
+  const outlinePreview = useOutlinePreview(placedTools
+    .filter(tool => smoothedToolIds?.has(tool.tool_id))
+    .map(tool => ({
+      id: tool.id, label: '', points: tool.points,
+      interior_rings: tool.interior_rings ?? [], smoothed: true,
+      smooth_level: smoothLevels?.get(tool.tool_id) ?? 0.5,
+    })))
+  const contours = new Map(outlinePreview.outlines?.map(outline => [outline.id, outline]))
   return (
     <>
       {/* SVG area */}
       <div className="absolute inset-0 bg-inset flex items-center justify-center p-4">
+        {outlinePreview.status && (
+          <div role="status" className="absolute bottom-3 left-3 z-10 rounded bg-surface px-3 py-2 text-sm text-text-primary">
+            {outlinePreview.status} Showing traced outlines.
+          </div>
+        )}
         <svg
           ref={svgRef}
           data-testid="bin-canvas"
@@ -157,18 +171,17 @@ export function BinEditorCanvas({
           })()}
 
           {placedTools.map(tool => {
-            const isSmoothed = smoothedToolIds?.has(tool.tool_id) ?? false
-            const level = smoothLevels?.get(tool.tool_id) ?? 0.5
-            const pathData = isSmoothed
-              ? smoothPathData(simplifyPolygon(tool.points, smoothEpsilon(level)), tool.interior_rings, DISPLAY_SCALE, tool.points)
-              : polygonPathData(tool.points, tool.interior_rings, DISPLAY_SCALE)
+            const contour = contours.get(tool.id)
+            const pathData = polygonPathData(
+              contour?.points ?? tool.points, contour?.interior_rings ?? tool.interior_rings, DISPLAY_SCALE,
+            )
             const isSelected = selection?.type === 'tool' && selection.toolId === tool.id
 
             return (
               <g key={tool.id} onClick={stopClickUnlessText}>
                 <path
                   d={pathData}
-                  fillRule={isSmoothed ? 'nonzero' : 'evenodd'}
+                  fillRule="evenodd"
                   fill={isSelected ? 'rgb(51, 65, 85)' : 'rgb(71, 85, 105)'}
                   stroke={isSelected ? 'rgb(148, 163, 184)' : 'rgb(100, 116, 139)'}
                   strokeWidth={handleStroke}

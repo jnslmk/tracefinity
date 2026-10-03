@@ -2,6 +2,7 @@
 run before clearance so the requested clearance is never consumed."""
 import numpy as np
 import pytest
+from shapely.geometry import LineString
 from shapely.geometry import Point as SPPoint
 from shapely.geometry import Polygon as SP
 
@@ -62,19 +63,6 @@ def _sp(points) -> ScaledPolygon:
     return ScaledPolygon("t", points, "t")
 
 
-class TestSmoothEpsilon:
-    def test_absolute_not_size_scaled(self):
-        # epsilon reflects trace noise (absolute mm), not tool size
-        assert smooth_epsilon(0.0) == pytest.approx(0.3)
-        assert smooth_epsilon(0.5) == pytest.approx(0.9)
-        assert smooth_epsilon(1.0) == pytest.approx(1.5)
-
-    def test_monotonic(self):
-        levels = [0.0, 0.25, 0.5, 0.75, 1.0]
-        eps = [smooth_epsilon(lv) for lv in levels]
-        assert eps == sorted(eps)
-
-
 class TestPrepareForGeneration:
     def test_smoothing_preserves_long_straight_edges(self, scaler):
         raw = _dense_rectangle(84.0, 20.0)
@@ -97,8 +85,7 @@ class TestPrepareForGeneration:
 
         worst = _min_clearance(reference, cut)
         assert worst >= clearance - 0.1, f"clearance eaten: worst {worst:.3f}mm"
-        # and not over-grown either. The union keeps the traced corners sharp,
-        # and clearance uses a mitre join, so bound it with the same join.
+        # Clearance remains an exact offset of the previewed envelope.
         assert cut.within(reference.buffer(clearance, join_style=2).buffer(0.01))
 
     def test_unsmoothed_clearance_contains_raw(self, scaler):
@@ -205,7 +192,7 @@ class TestNonErodingSmooth:
             0.0, abs=1e-6
         )
 
-    def test_metadata_survives_the_envelope_union(self, scaler):
+    def test_metadata_survives_the_covering_envelope(self, scaler):
         poly = ScaledPolygon("tool-1", _traced_with_tip(), "Cutter")
         poly.finger_holes = [ScaledFingerHole("h1", 5.0, 5.0, 2.0)]
         poly.depth_override = 7.5
@@ -216,3 +203,76 @@ class TestNonErodingSmooth:
             "tool-1", "Cutter", 7.5,
         )
         assert result.finger_holes is poly.finger_holes
+
+    def test_smoothed_pocket_removes_pixel_staircase_without_losing_fit(self, scaler):
+        raw = [
+            (0.0, 0.0), (10.0, 0.0), (10.0, -0.3),
+            (20.0, -0.3), (20.0, 0.0), (30.0, 0.0),
+            (30.0, -0.3), (40.0, -0.3), (40.0, 20.0), (0.0, 20.0),
+        ]
+        prepared = scaler.prepare_for_generation(_sp(raw), 0.7, smoothed=True)
+        cut = SP(prepared.points_mm)
+        assert SP(raw).buffer(0.7, quad_segs=24).difference(cut).area < 1e-6
+
+        points = np.asarray(prepared.points_mm)
+        edges = np.roll(points, -1, axis=0) - points
+        previous = np.roll(edges, 1, axis=0)
+        turns = np.abs(np.arctan2(
+            previous[:, 0] * edges[:, 1] - previous[:, 1] * edges[:, 0],
+            np.sum(previous * edges, axis=1),
+        ))
+        assert np.max(turns) < np.deg2rad(10), "pixel corners survived smoothing"
+
+    def test_rounded_envelope_keeps_straight_edges_parallel(self, scaler):
+        raw = _dense_rectangle(84.0, 20.0)
+        smoothed = SP(scaler.smooth(_sp(raw)).points_mm)
+        assert smoothed.covers(SP(raw))
+        # The conservative envelope may move the line outward, but must not
+        # bow a long tool edge into a curve or enlarge it by the tool's size.
+        assert -1.0 < smoothed.bounds[1] <= 0.0
+        intersections = [
+            smoothed.boundary.intersection(LineString([(x, -10), (x, 10)]))
+            for x in (20.0, 64.0)
+        ]
+        assert intersections[0].y == pytest.approx(intersections[1].y, abs=1e-6)
+
+
+class TestOutlinePreview:
+    @pytest.fixture
+    def client(self, auth_mode_settings, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+        from tests.conftest import set_auth_mode
+
+        set_auth_mode(monkeypatch, "open")
+        return TestClient(app)
+
+    def test_preview_preserves_tool_fit_and_interior_island(self, client):
+        raw = _traced_with_tip()
+        island = [(20.0, 20.0), (40.0, 20.0), (40.0, 30.0), (20.0, 30.0)]
+        response = client.post("/api/tools/preview-outline", json=[{
+            "id": "draft", "label": "Tool",
+            "points": [{"x": x, "y": y} for x, y in raw],
+            "interior_rings": [[{"x": x, "y": y} for x, y in island]],
+            "smoothed": True, "smooth_level": 1.0,
+        }])
+        assert response.status_code == 200
+        preview = response.json()[0]
+        contour = SP(
+            [(p["x"], p["y"]) for p in preview["points"]],
+            holes=[[(p["x"], p["y"]) for p in ring] for ring in preview["interior_rings"]],
+        )
+        assert contour.covers(SP(raw, holes=[island]))
+        assert not contour.covers(SPPoint(30.0, 25.0))
+        assert contour.covers(SPPoint(42.0, 1.2))
+
+    def test_preview_rejects_nonfinite_coordinates(self, client):
+        response = client.post("/api/tools/preview-outline", json=[{
+            "id": "draft", "label": "",
+            "points": [{"x": "NaN", "y": 0}, {"x": 20, "y": 0}, {"x": 0, "y": 20}],
+        }])
+        assert response.status_code == 422
+
+    def test_preview_requires_authentication(self, native_client):
+        assert native_client.post("/api/tools/preview-outline", json=[]).status_code == 401

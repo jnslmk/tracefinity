@@ -1,9 +1,9 @@
 'use client'
 
-import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
+import { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import { Plus, Circle, Disc, Square, RectangleHorizontal, Fingerprint, ImageIcon, Eye, EyeOff } from 'lucide-react'
 import type { Point, FingerHole, ToolImageContext, AffineMatrix } from '@/types'
-import { simplifyPolygon, smoothEpsilon, simplifyEpsilon, snapToGrid as snapToGridUtil } from '@/lib/svg'
+import { simplifyPolygon, simplifyEpsilon, snapToGrid as snapToGridUtil } from '@/lib/svg'
 import { rotateAround, flipAround } from '@/lib/affine'
 import { rotateGeometry, centroidOf } from '@/lib/geometry'
 import {
@@ -19,6 +19,7 @@ import { ToolEditorCanvas } from '@/components/ToolEditorCanvas'
 import type { EditMode, Selection } from '@/components/ToolEditorToolbar'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/hooks/useTheme'
+import { useOutlinePreview } from '@/hooks/useOutlinePreview'
 
 interface Props {
   points: Point[]
@@ -131,11 +132,11 @@ export function ToolEditor({ points, fingerHoles, interiorRings, smoothed, smoot
   const rawDisplayPoints = dragPoints ?? points
   const displayHoles = dragHoles ?? fingerHoles
   const displayRings = dragRings ?? currentRings
-  const smoothedPoints = useMemo(() => {
-    if (!previewSmoothed || rawDisplayPoints.length <= 3) return null
-    return simplifyPolygon(rawDisplayPoints, smoothEpsilon(smoothLevel))
-  }, [previewSmoothed, smoothLevel, rawDisplayPoints])
-  const displayPoints = previewSmoothed && smoothedPoints ? smoothedPoints : rawDisplayPoints
+  const outlinePreview = useOutlinePreview(previewSmoothed && rawDisplayPoints.length >= 3 ? [{
+    id: 'edited-tool', label: '', points: rawDisplayPoints,
+    interior_rings: displayRings, smoothed: true, smooth_level: smoothLevel,
+  }] : [])
+  const displayPoints = rawDisplayPoints
 
   // refs for stale closure avoidance
   const pointsRef = useRef(points)
@@ -822,9 +823,10 @@ export function ToolEditor({ points, fingerHoles, interiorRings, smoothed, smoot
         gridStep={gridStep}
         zoom={zoom}
         displayPoints={displayPoints}
-        rawPoints={rawDisplayPoints}
+        previewOutline={outlinePreview.outlines?.[0]}
         smoothed={previewSmoothed}
         interiorRings={displayRings}
+        previewStatus={previewSmoothed ? outlinePreview.status : null}
         points={points}
         editMode={editMode}
         selection={selection}

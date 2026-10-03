@@ -249,6 +249,24 @@ export async function renameSession(sessionId: string, name: string): Promise<vo
 
 // --- tool library ---
 
+export interface OutlinePreview {
+  id: string
+  points: Point[]
+  interior_rings: Point[][]
+}
+
+export interface OutlinePreviewInput extends OutlinePreview {
+  label: string
+  smoothed: boolean
+  smooth_level: number
+}
+
+export function previewToolOutlines(outlines: OutlinePreviewInput[], signal?: AbortSignal): Promise<OutlinePreview[]> {
+  return fetchApi('/api/tools/preview-outline', {
+    method: 'POST', body: JSON.stringify(outlines), signal,
+  })
+}
+
 export async function listTools(): Promise<ToolSummary[]> {
   const res = await fetchApi<{ tools: ToolSummary[] }>('/api/tools')
   return res.tools

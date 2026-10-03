@@ -75,6 +75,15 @@ Trace and mask-trace responses include the final visible `Polygon.label` values 
 - `POST /api/tools/{id}/auto-rotate` - compute optimal rotation angle (degrees) to minimise bounding box
 - `DELETE /api/tools/{id}` - delete tool
 
+`POST /api/tools/preview-outline` accepts an array of outline objects:
+`{id, label, points, interior_rings?, smoothed?, smooth_level?}`. Coordinates are
+millimetres. It returns the corresponding polygon objects with the actual
+zero-clearance smoothed/simplified points and interior rings, without changing
+stored tools. Defaults are `smoothed: true` and `smooth_level: 0.5`; levels must
+be finite and between 0 and 1. The batch is limited to 100 outlines and 100,000
+total vertices, and each ring requires at least three finite points. It uses
+the normal authentication rules and shares the SVG/STL preparation pipeline.
+
 ## Bins
 - `GET /api/bins` - list bins
 - `GET /api/bins/{id}` - get bin (syncs placed tools with library versions)

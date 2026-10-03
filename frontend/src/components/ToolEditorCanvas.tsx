@@ -3,11 +3,12 @@
 import { RefObject, useState } from 'react'
 import type { Point, FingerHole, ToolImageContext } from '@/types'
 import type { SymmetryAxis } from '@/lib/symmetry'
-import { polygonPathData, smoothPathData } from '@/lib/svg'
+import { polygonPathData } from '@/lib/svg'
 import { DISPLAY_SCALE } from '@/lib/constants'
 import { isRectangularCutout } from '@/lib/cutouts'
 import { CutoutOverlay } from '@/components/CutoutOverlay'
 import type { EditMode, Selection } from '@/components/ToolEditorToolbar'
+import type { OutlinePreview } from '@/lib/api'
 
 interface Props {
   svgRef: RefObject<SVGSVGElement | null>
@@ -29,9 +30,10 @@ interface Props {
 
   // polygon
   displayPoints: Point[]
-  rawPoints: Point[]
+  previewOutline?: OutlinePreview
   smoothed: boolean
   interiorRings?: Point[][]
+  previewStatus: string | null
 
   // edge/vertex interactions
   points: Point[]
@@ -60,7 +62,7 @@ export function ToolEditorCanvas({
   svgRef, zvbX, zvbY, zvbW, zvbH, isCutoutMode,
   handleBackgroundClick, handleSvgMouseDown,
   gridMinX, gridMaxX, gridMinY, gridMaxY, gridStep, zoom,
-  displayPoints, rawPoints, smoothed, interiorRings,
+  displayPoints, previewOutline, smoothed, interiorRings, previewStatus,
   points, editMode, selection,
   handleEdgeClick, handleVertexMouseDown,
   displayHoles, handleHoleMouseDown, handleResizeMouseDown, handleHoleRotateMouseDown,
@@ -86,6 +88,11 @@ export function ToolEditorCanvas({
     <>
       {/* SVG canvas - full bleed */}
       <div className="absolute inset-0">
+        {previewStatus && (
+          <div role="status" className="absolute bottom-3 left-3 z-10 rounded bg-surface px-3 py-2 text-sm text-text-primary">
+            {previewStatus} Showing traced outline.
+          </div>
+        )}
         <svg
           ref={svgRef}
           viewBox={`${zvbX} ${zvbY} ${zvbW} ${zvbH}`}
@@ -142,8 +149,8 @@ export function ToolEditorCanvas({
 
           {/* polygon fill */}
           <path
-            d={smoothed ? smoothPathData(displayPoints, interiorRings, DISPLAY_SCALE, rawPoints) : polygonPathData(displayPoints, interiorRings, DISPLAY_SCALE)}
-            fillRule={smoothed ? 'nonzero' : 'evenodd'}
+            d={polygonPathData(previewOutline?.points ?? displayPoints, previewOutline?.interior_rings ?? interiorRings, DISPLAY_SCALE)}
+            fillRule="evenodd"
             fill={sourceImage ? 'rgba(71, 85, 105, 0.18)' : 'rgb(71, 85, 105)'}
             stroke={sourceImage ? 'rgb(226, 232, 240)' : 'rgb(148, 163, 184)'}
             strokeWidth={(sourceImage ? 2.5 : 2) / zoom}

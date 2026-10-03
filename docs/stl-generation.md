@@ -4,6 +4,23 @@
 
 STL generation uses manifold3d (mesh booleans, 10-100x faster than OCCT B-rep). The gridfinity shell is constructed from first principles using `CrossSection` extrusions and `batch_boolean` operations. Polygon cutouts, finger holes, magnet holes and text labels are subtracted from the bin body in one pass. Filleted rectangle cutouts use a full-depth rounded-bottom cutter profile with a dynamic fillet radius clamped by both one-third of the rectangle width and half the pocket depth.
 
+Smoothed polygon cutters use a conservative rounded fit envelope rather than
+unioning raw traced edges back into a Chaikin curve. That union used to restore
+pixel stair-steps and their faceted vertical walls. Curve cleanup is bounded at
+0.005mm; a minimal outward round buffer then covers the complete traced tool,
+including interior-ring material. Smoothing may therefore add a small fit
+allowance of its own (dependent on trace noise and smoothing level), before the
+configured cutout clearance is applied. Long straight segments remain parallel
+lines. The 2D editor and SVG download use the same zero-clearance backend contour;
+the generated 3D preview and exported mesh add clearance to that contour.
+
+Mesh export rebuilds the native manifold at STL's float32 coordinate precision
+before passing its triangles to Trimesh. This collapses quantized slivers while
+preserving their neighboring topology. Do not weld vertices onto a coordinate
+grid and independently delete small faces: dense smoothed pockets exposed that
+cleanup as holes in an otherwise watertight solid. The same conversion serves
+STL, inserts, split parts, and 3MF bodies.
+
 ## Generation concurrency
 
 STL generation has no concurrency limit by default. Set

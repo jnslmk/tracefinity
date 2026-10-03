@@ -8,15 +8,14 @@ from app.models.schemas import FingerHole, Point, Polygon
 
 logger = logging.getLogger(__name__)
 
-# Two millimetres keeps a smoothed right-angle corner within about 0.4mm.
-# Mirrored in frontend lib/svg.ts; keep preview and generation in lockstep.
+# Two millimetres keeps a smoothed right-angle corner within about 0.4mm
+# before the conservative fit envelope is added.
 CHAIKIN_CORNER_SPAN_MM = 2.0
 
 
 def smooth_epsilon(level: float) -> float:
-    """DP tolerance for smoothing, absolute mm. trace noise is a property of
-    the camera/mask resolution, not the tool, so it must not scale with size.
-    mirrored in frontend lib/svg.ts smoothEpsilon; keep in lockstep."""
+    """DP tolerance for smoothing, absolute mm. Trace noise is a property of
+    the camera/mask resolution, not the tool, so it must not scale with size."""
     level = max(0.0, min(1.0, level))
     return 0.3 + level * 1.2
 
@@ -224,29 +223,45 @@ class PolygonScaler:
     def cover_traced_outline(
         self, traced: ScaledPolygon, smoothed: ScaledPolygon
     ) -> ScaledPolygon:
-        """union a smoothed cut with the traced cut it came from.
-        The pocket is cut from the smoothed outline, so smoothing may only ever
-        add material: a rounded corner or a simplified edge that moves inward
-        would leave the tool resting on a ledge. Unioning both regions makes the
-        smoothed cut a superset of the traced one, so the tool seats on its own
-        envelope. Interior rings follow the same rule, so an island can shrink
-        but never grow back into the traced tool."""
+        """Round the smoothed contour outward just enough to cover the trace.
+
+        Unioning the raw ring back in restores every convex pixel stair-step.
+        Instead find the smallest round buffer that covers the entire region,
+        including its holes. Straight segments stay straight and parallel.
+        """
         try:
-            combined = self._as_shape(smoothed).union(self._as_shape(traced))
+            candidate = self._as_shape(smoothed)
+            envelope = self._as_shape(traced)
+            if candidate.covers(envelope):
+                return smoothed
+            low = 0.0
+            high = candidate.hausdorff_distance(envelope) + 0.005
+            combined = candidate.buffer(high, quad_segs=24)
+            while not combined.covers(envelope):
+                high *= 2
+                combined = candidate.buffer(high, quad_segs=24)
+            # A 5-micron search bound is below printable contour resolution.
+            while high - low > 0.005:
+                mid = (low + high) / 2
+                buffered = candidate.buffer(mid, quad_segs=24)
+                if buffered.covers(envelope):
+                    high, combined = mid, buffered
+                else:
+                    low = mid
         except Exception:
             logger.exception(
-                "smoothing envelope union failed for %s; keeping smoothed outline",
+                "smoothing envelope failed for %s; keeping traced outline",
                 traced.id,
             )
-            return smoothed
+            return traced
 
         result = self._largest_polygon(combined)
         if result is None:
             logger.warning(
-                "smoothing envelope union produced no usable outline for %s; keeping smoothed outline",
+                "smoothing envelope produced no usable outline for %s; keeping traced outline",
                 traced.id,
             )
-            return smoothed
+            return traced
         if combined.geom_type != "Polygon":
             logger.warning(
                 "smoothed outline %s split while covering the traced envelope; keeping largest piece",
@@ -261,10 +276,10 @@ class PolygonScaler:
         )
 
     def smooth(self, polygon: ScaledPolygon, level: float = 0.5) -> ScaledPolygon:
-        """simplify, bound corner influence, then subdivide and clean.
-        level 0..1 controls simplification aggressiveness before smoothing.
-        The result always covers the traced outline; smoothing rounds corners
-        and straightens edges only where that adds material."""
+        """Simplify, bound corner influence, then round a covering contour.
+        Level 0..1 controls simplification before smoothing. A minimal outward
+        fit envelope preserves convex traced features without restoring noise.
+        """
         pts = polygon.points_mm
         if len(pts) < 4:
             return polygon
@@ -276,10 +291,10 @@ class PolygonScaler:
             _chaikin_smooth(_add_chaikin_support_points(ring))
             for ring in simplified.interior_rings_mm
         ]
-        # clean up dense chaikin output — remove near-collinear points that
-        # cause clipper2 chord artifacts, while keeping the smooth shape
+        # Keep curve chords below printable resolution; the old 0.05mm cleanup
+        # visibly faceted tight curves before the cutter was even extruded.
         result = ScaledPolygon(polygon.id, smoothed_pts, polygon.label, polygon.finger_holes, smoothed_rings, depth_override=polygon.depth_override)
-        result = self.simplify(result, tolerance_mm=0.05)
+        result = self.simplify(result, tolerance_mm=0.005)
         return self.cover_traced_outline(polygon, result)
 
     def prepare_for_generation(
