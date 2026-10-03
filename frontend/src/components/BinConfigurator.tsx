@@ -6,7 +6,7 @@ import { Info } from 'lucide-react'
 import type { BinConfig, BinHeightPlanning, HeightProposal, PlacedTool } from '@/types'
 import { NumericInput } from '@/components/NumericInput'
 import { createPartialBinsValues } from '@/lib/binDefaults'
-import { maxGridUnitsForOtherAxis } from '@/lib/constants'
+import { MAX_GRID_UNITS, maxGridUnitsForOtherAxis } from '@/lib/constants'
 import { BED_SIZE_MAX_MM, BED_SIZE_MIN_MM } from '@/lib/settings'
 import { cn } from '@/lib/utils'
 import { ClassValue } from 'clsx'
@@ -76,6 +76,7 @@ function SliderRow({
   value,
   min,
   max,
+  sliderMax = max,
   step = 1,
   unit,
   help,
@@ -86,13 +87,14 @@ function SliderRow({
   value: number
   min: number
   max: number
+  sliderMax?: number
   step?: number
   unit?: string
   help?: string
   onChange: (v: number) => void
   disabled?: boolean
 }) {
-  const pct = max > min ? ((value - min) / (max - min)) * 100 : 0
+  const pct = sliderMax > min ? ((value - min) / (sliderMax - min)) * 100 : 0
 
   return (
     <div className={`relative space-y-1.5 py-2 ${disabled ? 'opacity-40 pointer-events-none' : ''}`}>
@@ -104,13 +106,13 @@ function SliderRow({
         <input
           type="range"
           min={min}
-          max={max}
+          max={sliderMax}
           step={step}
           value={value}
           disabled={disabled}
           onChange={(e) => {
             const v = step >= 1 ? parseInt(e.target.value) : parseFloat(e.target.value)
-            onChange(v)
+            onChange(Math.min(v, max))
           }}
           className="flex-1 min-w-0"
           style={{ '--slider-pct': `${pct}%` } as React.CSSProperties}
@@ -191,6 +193,7 @@ export function BinConfigurator({ config, onChange, autoSize, onAutoSizeChange, 
         value={config.grid_x}
         min={1}
         max={maxGridUnitsForOtherAxis(config.grid_y)}
+        sliderMax={MAX_GRID_UNITS}
         step={0.5}
         unit="u"
         onChange={(v) =>
@@ -208,6 +211,7 @@ export function BinConfigurator({ config, onChange, autoSize, onAutoSizeChange, 
         value={config.grid_y}
         min={1}
         max={maxGridUnitsForOtherAxis(config.grid_x)}
+        sliderMax={MAX_GRID_UNITS}
         step={0.5}
         unit="u"
         onChange={(v) =>

@@ -7,7 +7,7 @@ Gridfinity is a modular storage system where bins snap into a baseplate grid. Ea
 | Setting | Range | Default | Notes |
 |-|-|-|-|
 | Grid width | 1-25 u | 2 | Each unit is 42mm; the grid footprint is limited to 100 cells |
-| Grid depth | 1-25 u | 2 | The available maximum adjusts with the width |
+| Grid depth | 1-25 u | 2 | Each unit is 42mm; the grid footprint is limited to 100 cells |
 | Height | 1-20 u | 4 | Each unit is 7mm, including the 4.75mm base; lip and raised rim add height above this |
 | Cutout depth | 5mm-max (0.25mm at 1u) | 20mm | Max is height × 7mm − 4.75mm base − 2mm floor |
 | Clearance | 0-5mm | 1.0mm | Gap around tool outlines |
@@ -47,6 +47,11 @@ same physical maximum.
 On by default. When enabled, grid width and depth automatically adjust to fit all placed tools, and the grid width/depth sliders are disabled. Toggle it off to set grid size manually; the sliders become active again.
 
 Bins can be up to 25 units on either axis with a 100-cell grid footprint. Long, narrow bins are supported and are split according to the configured bed size. If an auto-sized layout exceeds either safety limit, Tracefinity keeps saving the tool placement but pauses preview and export until the tools are reduced or rearranged.
+
+Both manual grid sliders use a fixed 1–25u scale, so changing one dimension
+does not move the other slider's thumb. Each dimension stops at the largest
+value allowed by the 100-cell footprint (`ceil(width) × ceil(depth)`); the
+numeric input's maximum reflects that limit.
 
 ## Default bin settings
 
