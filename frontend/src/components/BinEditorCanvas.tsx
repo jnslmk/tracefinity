@@ -120,39 +120,6 @@ export function BinEditorCanvas({
           onClick={handleBackgroundClick}
         >
           <rect x="0" y="0" width={displayWidth} height={displayHeight} fill="rgb(30, 41, 59)" rx="4" />
-          {/* full-grid lines at every 0.5-unit step up to gridX */}
-          {Array.from({ length: Math.floor(gridX * 2) + 1 }).map((_, i) => {
-            const pos = i * 0.5
-            const isBoundary = pos === 0 || pos === gridX
-            const isFullUnit = Number.isInteger(pos)
-            if (!isBoundary && !isFullUnit && !halfGridBase) return null
-            return (
-              <line
-                key={`v${i}`}
-                x1={pos * GRID_UNIT * DISPLAY_SCALE} y1={0}
-                x2={pos * GRID_UNIT * DISPLAY_SCALE} y2={displayHeight}
-                stroke={isFullUnit ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.05)'}
-                strokeWidth={1}
-                strokeDasharray={isBoundary ? undefined : '4,4'}
-              />
-            )
-          })}
-          {Array.from({ length: Math.floor(gridY * 2) + 1 }).map((_, i) => {
-            const pos = i * 0.5
-            const isBoundary = pos === 0 || pos === gridY
-            const isFullUnit = Number.isInteger(pos)
-            if (!isBoundary && !isFullUnit && !halfGridBase) return null
-            return (
-              <line
-                key={`h${i}`}
-                x1={0} y1={pos * GRID_UNIT * DISPLAY_SCALE}
-                x2={displayWidth} y2={pos * GRID_UNIT * DISPLAY_SCALE}
-                stroke={isFullUnit ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.05)'}
-                strokeWidth={1}
-                strokeDasharray={isBoundary ? undefined : '4,4'}
-              />
-            )
-          })}
 
           {/* disabled partial-bin cells */}
           {partialBins && Array.from({ length: gridY }).map((_, iy) =>
@@ -218,6 +185,43 @@ export function BinEditorCanvas({
                   onMouseDown={(holeId, e) => onHoleClick(tool.id, holeId, e)}
                 />
               </g>
+            )
+          })}
+          {/* Grid stays above tool fills; screen-space strokes remain visible when zoomed out. */}
+          {Array.from({ length: Math.floor(gridX * 2) + 1 }).map((_, i) => {
+            const pos = i * 0.5
+            const isBoundary = pos === 0 || pos === gridX
+            const isFullUnit = Number.isInteger(pos)
+            if (!isBoundary && !isFullUnit && !halfGridBase) return null
+            return (
+              <line
+                key={`v${i}`}
+                x1={pos * GRID_UNIT * DISPLAY_SCALE} y1={0}
+                x2={pos * GRID_UNIT * DISPLAY_SCALE} y2={displayHeight}
+                stroke={isFullUnit ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.15)'}
+                strokeWidth={1}
+                vectorEffect="non-scaling-stroke"
+                strokeDasharray={isBoundary || isFullUnit ? undefined : '4,4'}
+                className="pointer-events-none"
+              />
+            )
+          })}
+          {Array.from({ length: Math.floor(gridY * 2) + 1 }).map((_, i) => {
+            const pos = i * 0.5
+            const isBoundary = pos === 0 || pos === gridY
+            const isFullUnit = Number.isInteger(pos)
+            if (!isBoundary && !isFullUnit && !halfGridBase) return null
+            return (
+              <line
+                key={`h${i}`}
+                x1={0} y1={pos * GRID_UNIT * DISPLAY_SCALE}
+                x2={displayWidth} y2={pos * GRID_UNIT * DISPLAY_SCALE}
+                stroke={isFullUnit ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.15)'}
+                strokeWidth={1}
+                vectorEffect="non-scaling-stroke"
+                strokeDasharray={isBoundary || isFullUnit ? undefined : '4,4'}
+                className="pointer-events-none"
+              />
             )
           })}
 
