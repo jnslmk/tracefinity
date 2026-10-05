@@ -87,6 +87,7 @@ Local and remote saliency tracers run on the paper rect from `_detect_paper_rect
 - Masks come back at different dimensions AND aspect ratio than requested. `_trace_mask()` resizes with `INTER_NEAREST`, then `_align_mask()` uses template matching to correct the positional offset.
 - `_align_mask()` extracts the tool region from the resized mask, searches for it in the inverted corrected image via `cv2.matchTemplate(TM_CCOEFF_NORMED)`, and applies a translation. Runs at 0.25x resolution (~20ms). Skipped if score < 0.15 or shift > 10% of image dimension.
 - `_trace_mask()` handles both alpha-channel PNGs (tool=opaque, bg=transparent) and RGB PNGs (tool=black, bg=white).
+- Contour extraction filters tool regions below 500 pixels in the corrected-image coordinate frame. A 5000-pixel cutoff silently discarded real thin tools such as tweezers, even when Gemini's mask included them. Do not use morphological opening to remove mask specks: it can sever narrow tool arms and erase tips. The area filter removes isolated specks without eroding the tool silhouettes; gap-closing still handles small breaks in masks.
 - The prompt asks for a "stencil" -- flat black shapes on flat white. This works better than asking for a "mask" with `gemini-2.5-flash-image`.
 
 ## Toolbox vertical datums

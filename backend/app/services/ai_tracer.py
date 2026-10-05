@@ -642,7 +642,7 @@ class AITracer:
         self,
         mask_path: str,
         original_path: str,
-        min_area: int = 5000,
+        min_area: int = 500,
         align: bool = False,
     ) -> list[tuple[list[tuple[float, float]], list[list[tuple[float, float]]]]]:
         """trace contours from mask image. returns list of (exterior, [holes])."""
@@ -691,7 +691,6 @@ class AITracer:
 
         kernel = np.ones((3, 3), np.uint8)
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
-        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
 
         mask_contours, hierarchy = cv2.findContours(thresh, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
         if not mask_contours or hierarchy is None:
