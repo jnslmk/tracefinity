@@ -111,8 +111,13 @@ they belong to the bin, are stored in its `bin_config`, and never move when
 tools are auto-arranged, recentred or re-synced from the library.
 
 1. Click the **Pocket** tool in the floating toolbar.
-2. Click inside the bin to place a pocket. It is selected, and the **Access
-   pocket** panel opens.
+2. Drag from one corner to the opposite corner inside the bin to draw the
+   pocket's length and width. The outline and nominal dimensions update as you
+   drag; release to add it. Drawing works in any direction, uses **Snap** when
+   enabled, and stops at the bin boundary. Press **Esc** to cancel.
+3. The new pocket is selected and the **Access pocket** panel opens for exact
+   dimensions, depth and finishing. A single click still places a default-sized
+   pocket; switch back to **Pocket** to add another.
 
 The panel edits the selected pocket:
 

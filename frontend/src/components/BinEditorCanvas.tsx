@@ -42,6 +42,7 @@ interface Props {
   halfGridBase?: boolean
   accessPockets: AccessPocket[]
   binChamfer: number
+  pendingPocket: AccessPocket | null
   pocketMaxDepth: number
   onPocketMouseDown: (id: string) => (e: React.MouseEvent) => void
   onPocketRotateMouseDown: (id: string) => (e: React.MouseEvent) => void
@@ -62,6 +63,7 @@ interface Props {
   handleLabelDoubleClick: (labelId: string) => (e: React.MouseEvent) => void
   onHoleClick: (toolId: string, holeId: string, e: React.MouseEvent) => void
   handleBackgroundClick: (e: React.MouseEvent) => void
+  handleBackgroundPointerDown: (e: React.PointerEvent) => void
   stopClick: (e: React.MouseEvent) => void
   stopClickUnlessText: (e: React.MouseEvent) => void
   onEditingTextChange: (text: string) => void
@@ -96,6 +98,7 @@ export function BinEditorCanvas({
   defaultCutoutDepth,
   halfGridBase,
   accessPockets,
+  pendingPocket,
   binChamfer,
   pocketMaxDepth,
   onPocketMouseDown,
@@ -114,6 +117,7 @@ export function BinEditorCanvas({
   handleLabelDoubleClick,
   onHoleClick,
   handleBackgroundClick,
+  handleBackgroundPointerDown,
   stopClick,
   stopClickUnlessText,
   onEditingTextChange,
@@ -146,8 +150,9 @@ export function BinEditorCanvas({
           viewBox={`-10 -10 ${displayWidth + 70} ${displayHeight + 30}`}
           preserveAspectRatio="xMidYMid meet"
           className={`rounded max-w-full max-h-full ${activeTool === 'select' ? 'cursor-default' : 'cursor-crosshair'}`}
-          style={{ overflow: 'visible' }}
+          style={{ overflow: 'visible', touchAction: activeTool === 'pocket' ? 'none' : undefined }}
           onClick={handleBackgroundClick}
+          onPointerDownCapture={handleBackgroundPointerDown}
         >
           <rect x="0" y="0" width={displayWidth} height={displayHeight} fill="rgb(30, 41, 59)" rx="4" />
 
@@ -231,7 +236,7 @@ export function BinEditorCanvas({
             )
           })}
           <AccessPocketOverlay
-            pockets={accessPockets}
+            pockets={pendingPocket ? [...accessPockets, pendingPocket] : accessPockets}
             selectedId={selection?.type === 'pocket' ? selection.pocketId : undefined}
             binChamfer={binChamfer}
             maxDepth={pocketMaxDepth}
@@ -483,6 +488,13 @@ export function BinEditorCanvas({
           )}
         </svg>
       </div>
+      {activeTool === 'pocket' && (
+        <div role="status" className="fixed bottom-3 sm:absolute sm:bottom-6 left-1/2 -translate-x-1/2 z-20 pointer-events-none w-max max-w-[calc(100vw-1.5rem)] rounded border border-glass-border bg-surface px-3 py-2 text-xs text-text-primary text-center tabular-nums">
+          {pendingPocket
+            ? <><span className="font-medium">{pendingPocket.length.toFixed(1)} × {pendingPocket.width.toFixed(1)} mm</span><br />Release to add · Esc to cancel</>
+            : 'Drag to draw a pocket · Click to place'}
+        </div>
+      )}
 
     </>
   )

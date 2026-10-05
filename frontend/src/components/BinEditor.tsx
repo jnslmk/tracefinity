@@ -75,6 +75,7 @@ type DragState =
   | { type: 'pocket'; pocketId: string; startX: number; startY: number; origX: number; origY: number }
   | { type: 'pocket-resize'; pocketId: string; corner: number; origPocket: AccessPocket }
   | { type: 'pocket-rotate'; pocketId: string; centerX: number; centerY: number; startAngle: number; origRotation: number }
+  | { type: 'pocket-draw'; pocket: AccessPocket; startX: number; startY: number; clientX: number; clientY: number; pointerId: number }
   | null
 
 function ArrangeProgress({ timeBudget }: { timeBudget: number }) {
@@ -138,6 +139,8 @@ export function BinEditor({
   const [selection, setSelection] = useState<Selection>(null)
   const [activeTool, setActiveTool] = useState<Tool>('select')
   const [dragging, setDragging] = useState<DragState>(null)
+  const [pendingPocket, setPendingPocket] = useState<AccessPocket | null>(null)
+  const suppressPocketClick = useRef(false)
   const [snapEnabled, setSnapEnabled] = useState(false)
   const [snapGrid, setSnapGrid] = useState(SNAP_GRID)
   const [arranging, setArranging] = useState(false)
@@ -173,6 +176,8 @@ export function BinEditor({
     setSelection(null)
     setPendingLabel(null)
     setEditingLabelId(null)
+    setPendingPocket(null)
+    setDragging(prev => prev?.type === 'pocket-draw' ? null : prev)
   }, [historyRevision])
   const [pendingLabel, setPendingLabel] = useState<{ x: number; y: number } | null>(null)
   const [pendingText, setPendingText] = useState('')
@@ -503,8 +508,21 @@ export function BinEditor({
     return false
   }, [pointInRing])
 
+  const drawnPocket = useCallback((drag: Extract<DragState, { type: 'pocket-draw' }>, clientX: number, clientY: number) => {
+    if (Math.hypot(clientX - drag.clientX, clientY - drag.clientY) < 3) return drag.pocket
+    const pos = screenToMm(clientX, clientY)
+    const x = Math.max(0, Math.min(binWidthMm, snapToGrid(pos.x)))
+    const y = Math.max(0, Math.min(binHeightMm, snapToGrid(pos.y)))
+    return clampPocket({
+      ...drag.pocket,
+      x: (drag.startX + x) / 2, y: (drag.startY + y) / 2,
+      length: Math.abs(x - drag.startX), width: Math.abs(y - drag.startY),
+    }, maxCutoutDepth)
+  }, [screenToMm, snapToGrid, binWidthMm, binHeightMm, maxCutoutDepth])
+
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!dragging) return
+    if (dragging.type === 'pocket-draw' && 'pointerId' in e && e.pointerId !== dragging.pointerId) return
     arrangeInputVersion.current += 1
     const clientX = e.clientX
     const clientY = e.clientY
@@ -520,7 +538,9 @@ export function BinEditor({
       const currentPockets = pocketsRef.current
       const onPocketsChange = onPocketsChangeRef.current
 
-      if (dragging.type === 'tool') {
+      if (dragging.type === 'pocket-draw') {
+        setPendingPocket(drawnPocket(dragging, clientX, clientY))
+      } else if (dragging.type === 'tool') {
         const origCenterX = dragging.origPoints.reduce((sum, p) => sum + p.x, 0) / dragging.origPoints.length
         const origCenterY = dragging.origPoints.reduce((sum, p) => sum + p.y, 0) / dragging.origPoints.length
         const rawDx = pos.x - dragging.startX
@@ -628,24 +648,53 @@ export function BinEditor({
         )
       }
     })
-  }, [dragging, screenToMm, snapToGrid, isInsideCutout, maxCutoutDepth])
+  }, [dragging, screenToMm, snapToGrid, isInsideCutout, maxCutoutDepth, drawnPocket])
 
-  const handleMouseUp = useCallback(() => {
+  const handleMouseUp = useCallback((e: MouseEvent) => {
+    if (dragging?.type === 'pocket-draw' && 'pointerId' in e && e.pointerId !== dragging.pointerId) return
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current)
       rafRef.current = null
     }
+    if (dragging?.type === 'pocket-draw') {
+      const pocket = drawnPocket(dragging, e.clientX, e.clientY)
+      onPocketsChangeRef.current([...pocketsRef.current, pocket], 'Add pocket')
+      setPendingPocket(null)
+      setSelection({ type: 'pocket', pocketId: pocket.id })
+      setActiveTool('select')
+    }
     setDragging(null)
-  }, [])
+  }, [dragging, drawnPocket])
 
   useEffect(() => {
-    if (dragging) {
-      window.addEventListener('mousemove', handleMouseMove)
-      window.addEventListener('mouseup', handleMouseUp)
-      return () => {
-        window.removeEventListener('mousemove', handleMouseMove)
-        window.removeEventListener('mouseup', handleMouseUp)
+    if (!dragging) return
+    if (dragging.type === 'pocket-draw') {
+      const cancel = (event?: PointerEvent) => {
+        if (event && event.pointerId !== dragging.pointerId) return
+        if (rafRef.current) cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+        setPendingPocket(null)
+        setDragging(null)
       }
+      const onKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') cancel() }
+      window.addEventListener('pointermove', handleMouseMove)
+      window.addEventListener('pointerup', handleMouseUp)
+      window.addEventListener('pointercancel', cancel)
+      window.addEventListener('keydown', onKeyDown)
+      return () => {
+        window.removeEventListener('pointermove', handleMouseMove)
+        window.removeEventListener('pointerup', handleMouseUp)
+        window.removeEventListener('pointercancel', cancel)
+        window.removeEventListener('keydown', onKeyDown)
+        if (rafRef.current) cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+    }
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
     }
   }, [dragging, handleMouseMove, handleMouseUp])
 
@@ -683,7 +732,27 @@ export function BinEditor({
     setPendingText('')
   }, [pendingLabel, pendingText, textLabels, onTextLabelsChange])
 
+  const handleBackgroundPointerDown = (e: React.PointerEvent) => {
+    suppressPocketClick.current = false
+    if (activeTool !== 'pocket' || e.button !== 0 || e.isPrimary === false || dragging) return
+    const pos = screenToMm(e.clientX, e.clientY)
+    if (pos.x < 0 || pos.x > binWidthMm || pos.y < 0 || pos.y > binHeightMm) return
+    e.preventDefault()
+    e.currentTarget.setPointerCapture?.(e.pointerId)
+    const x = Math.max(0, Math.min(binWidthMm, snapToGrid(pos.x)))
+    const y = Math.max(0, Math.min(binHeightMm, snapToGrid(pos.y)))
+    const pocket = clampPocket(defaultPocket('rectangle', x, y), maxCutoutDepth)
+    suppressPocketClick.current = true
+    setSelection(null)
+    setPendingPocket(pocket)
+    setDragging({ type: 'pocket-draw', pocket, startX: x, startY: y, clientX: e.clientX, clientY: e.clientY, pointerId: e.pointerId })
+  }
+
   const handleBackgroundClick = (e: React.MouseEvent) => {
+    if (suppressPocketClick.current) {
+      suppressPocketClick.current = false
+      return
+    }
     if (activeTool === 'text') {
       if (pendingLabel) {
         commitPendingLabel()
@@ -700,9 +769,10 @@ export function BinEditor({
     if (activeTool === 'pocket') {
       const pos = screenToMm(e.clientX, e.clientY)
       if (pos.x >= 0 && pos.x <= binWidthMm && pos.y >= 0 && pos.y <= binHeightMm) {
-        const pocket = defaultPocket('rectangle', snapToGrid(pos.x), snapToGrid(pos.y))
+        const pocket = clampPocket(defaultPocket('rectangle', snapToGrid(pos.x), snapToGrid(pos.y)), maxCutoutDepth)
         onAccessPocketsChange([...accessPockets, pocket], 'Add pocket')
         setSelection({ type: 'pocket', pocketId: pocket.id })
+        setActiveTool('select')
       }
       return
     }
@@ -1038,6 +1108,7 @@ export function BinEditor({
         defaultCutoutDepth={defaultCutoutDepth}
         halfGridBase={halfGridBase}
         accessPockets={accessPockets}
+        pendingPocket={pendingPocket}
         binChamfer={binChamfer}
         pocketMaxDepth={maxCutoutDepth}
         onPocketMouseDown={handlePocketMouseDown}
@@ -1055,6 +1126,7 @@ export function BinEditor({
         handleLabelRotateMouseDown={handleLabelRotateMouseDown}
         handleLabelDoubleClick={handleLabelDoubleClick}
         handleBackgroundClick={handleBackgroundClick}
+        handleBackgroundPointerDown={handleBackgroundPointerDown}
         stopClick={stopClick}
         stopClickUnlessText={stopClickUnlessText}
         onEditingTextChange={setEditingText}

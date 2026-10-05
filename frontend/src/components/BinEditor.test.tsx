@@ -515,17 +515,71 @@ describe('BinEditor access pockets', () => {
 
   it('places a pocket at the clicked position when the pocket tool is active', () => {
     const onChange = vi.fn()
+    vi.stubGlobal('PointerEvent', MouseEvent)
     render(<PocketEditor onChange={onChange} />)
     const svg = screen.getByTestId('bin-canvas')
     vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 742, height: 702 } as DOMRect)
     fireEvent.click(screen.getByRole('button', { name: 'Pocket' }))
+    fireEvent.pointerDown(svg, { clientX: 178, clientY: 178, button: 0 })
+    fireEvent.pointerUp(window, { clientX: 178, clientY: 178 })
     fireEvent.click(svg, { clientX: 10 + 21 * 8, clientY: 10 + 21 * 8 })
     expect(onChange).toHaveBeenCalled()
     const added = onChange.mock.calls.at(-1)![0] as AccessPocket[]
     expect(added).toHaveLength(1)
-    expect(added[0]).toMatchObject({ shape: 'rectangle', x: 21, y: 21, edge: 'inherit', corner_radius: 0, bottom_radius: 0 })
-    // the new pocket is selected, so its controls are visible
+    expect(added[0]).toMatchObject({ shape: 'rectangle', x: 21, y: 21, length: 30, width: 20 })
     expect(screen.getByLabelText('Access pocket settings')).toBeTruthy()
+  })
+
+  it('previews a drawn pocket and commits the release dimensions once, in either direction', () => {
+    const advanceFrame = frameController()
+    vi.stubGlobal('PointerEvent', MouseEvent)
+    const onChange = vi.fn()
+    render(<PocketEditor onChange={onChange} />)
+    const svg = screen.getByTestId('bin-canvas')
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 742, height: 702 } as DOMRect)
+    fireEvent.click(screen.getByRole('button', { name: 'Pocket' }))
+    fireEvent.pointerDown(svg, { clientX: 410, clientY: 330, button: 0 })
+    fireEvent.pointerMove(window, { clientX: 170, clientY: 90 })
+    advanceFrame()
+    expect(screen.getByText('30.0 × 30.0 mm')).toBeTruthy()
+    expect(onChange).not.toHaveBeenCalled()
+    // Release before the next animation frame: its coordinates must win.
+    fireEvent.pointerMove(window, { clientX: 90, clientY: 170 })
+    fireEvent.pointerUp(window, { clientX: 90, clientY: 170 })
+    fireEvent.click(svg, { clientX: 90, clientY: 170 })
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange.mock.calls[0][0][0]).toMatchObject({
+      x: 30, y: 30, length: 40, width: 20, shape: 'rectangle',
+    })
+    expect((screen.getByLabelText('Length (mm)') as HTMLInputElement).value).toBe('40')
+  })
+
+  it.each(['escape', 'pointercancel'])('discards an unfinished pocket on %s', cancel => {
+    vi.stubGlobal('PointerEvent', MouseEvent)
+    const onChange = vi.fn()
+    render(<PocketEditor onChange={onChange} />)
+    const svg = screen.getByTestId('bin-canvas')
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 742, height: 702 } as DOMRect)
+    fireEvent.click(screen.getByRole('button', { name: 'Pocket' }))
+    fireEvent.pointerDown(svg, { clientX: 170, clientY: 170, button: 0 })
+    if (cancel === 'escape') fireEvent.keyDown(window, { key: 'Escape' })
+    else fireEvent.pointerCancel(window)
+    fireEvent.pointerUp(window, { clientX: 330, clientY: 330 })
+    expect(onChange).not.toHaveBeenCalled()
+    expect(svg.querySelector('[data-testid^="access-pocket-group-"]')).toBeNull()
+  })
+
+  it('snaps drawn corners, clamps the endpoint to the bin and keeps a thin drag usable', () => {
+    vi.stubGlobal('PointerEvent', MouseEvent)
+    const onChange = vi.fn()
+    render(<PocketEditor onChange={onChange} />)
+    const svg = screen.getByTestId('bin-canvas')
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 742, height: 702 } as DOMRect)
+    fireEvent.click(screen.getByTitle(`Snap to ${SNAP_GRID}mm grid (off)`))
+    fireEvent.click(screen.getByRole('button', { name: 'Pocket' }))
+    fireEvent.pointerDown(svg, { clientX: 10 + 21 * 8, clientY: 10 + 22 * 8, button: 0 })
+    fireEvent.pointerUp(window, { clientX: 10 + 100 * 8, clientY: 10 + 22 * 8 })
+    expect(onChange.mock.calls[0][0][0]).toMatchObject({ x: 52, y: 20, length: 64, width: 1 })
   })
 
   it('selects a pocket and edits it through the controls', () => {
