@@ -191,27 +191,46 @@ class ImageProcessor:
         self, img: np.ndarray, gray: np.ndarray,
         min_area: float, max_area: float, margin: int, h: int, w: int
     ) -> list[tuple[float, float]] | None:
-        """find bright, low-saturation paper without narrow metal protrusions."""
+        """find neutral or cool-lit paper without warm wood or metal protrusions."""
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        gray = gray.copy()
-        gray[hsv[:, :, 1] > 45] = 0
-        # Remove thin highlights before closing gaps; otherwise a caliper crossing
-        # the sheet extends its bounding rectangle all the way to the tool's tip.
+        paper_pixels = hsv[:, :, 1] <= 45
         opening_k = max(3, int(min(h, w) * 0.03) | 1)
-        gray = cv2.morphologyEx(
-            gray, cv2.MORPH_OPEN, np.ones((opening_k, opening_k), np.uint8)
-        )
-        # try all thresholds and pick the largest valid candidate
-        best_result = None
-        best_area = 0
-        for thresh_val in [200, 190, 180]:
-            result, area = self._try_brightness_threshold(
-                gray, thresh_val, min_area, max_area, margin, h, w
+        opening_kernel = np.ones((opening_k, opening_k), np.uint8)
+
+        for allow_cool_cast in (False, True):
+            if allow_cool_cast:
+                # White paper in blue light is saturated in HSV. Lab separates
+                # that blue/yellow cast from red/green chroma: keep near-neutral
+                # a* with non-yellow b*, still excluding warm wood and vivid tools.
+                lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+                paper_pixels |= cv2.inRange(lab, (0, 113, 0), (255, 143, 128)) > 0
+            candidate_gray = gray.copy()
+            candidate_gray[~paper_pixels] = 0
+            # Disconnect thin silver tools before closing gaps in the paper.
+            candidate_gray = cv2.morphologyEx(
+                candidate_gray, cv2.MORPH_OPEN, opening_kernel
             )
-            if result and area > best_area:
-                best_result = result
-                best_area = area
-        return best_result
+            # Estimate exposure only from eligible pixels, not the artificial
+            # zeros introduced by color gating or tool masking.
+            eligible = candidate_gray[candidate_gray > 0]
+            if eligible.size == 0:
+                continue
+            thresholds = (200, 190, 180)
+            brightness_scale = min(1.0, float(np.percentile(eligible, 95)) / thresholds[0])
+            best_result = None
+            best_area = 0
+            for thresh_val in thresholds:
+                result, area = self._try_brightness_threshold(
+                    candidate_gray, int(thresh_val * brightness_scale),
+                    min_area, max_area, margin, h, w
+                )
+                if result and area > best_area:
+                    best_result = result
+                    best_area = area
+            # Preserve successful neutral detections before relaxing the color gate.
+            if best_result:
+                return best_result
+        return None
 
     def _try_brightness_threshold(
         self, gray: np.ndarray, thresh_val: int,
