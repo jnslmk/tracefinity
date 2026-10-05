@@ -59,7 +59,7 @@ test.describe.serial('happy path', () => {
     await page.goto('/')
     await page.waitForLoadState('networkidle')
 
-    const fileInput = page.locator('input[type="file"]')
+    const fileInput = page.locator('input[type="file"][accept="image/*"]')
     await fileInput.setInputFiles(FIXTURE_IMAGE)
 
     await page.waitForURL(/\/trace\//, { timeout: 60_000 })
@@ -319,7 +319,7 @@ test.describe.serial('happy path', () => {
       el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }))
     })
 
-    await expect(page.getByRole('button', { name: 'Remove' })).toBeVisible({ timeout: 5_000 })
+    await expect(page.getByRole('button', { name: 'Remove', exact: true })).toBeVisible({ timeout: 5_000 })
   })
 
   test('add text label', async () => {
