@@ -907,11 +907,23 @@ export function BinEditor({
     setSelection({ type: 'pocket', pocketId: copy.id })
   }
 
-  const handleDeletePocket = () => {
+  const handleDeletePocket = useCallback(() => {
     if (selection?.type !== 'pocket') return
     onAccessPocketsChange(accessPockets.filter(p => p.id !== selection.pocketId), 'Remove pocket')
     setSelection(null)
-  }
+  }, [selection, accessPockets, onAccessPocketsChange])
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Delete' || selection?.type !== 'pocket' || dragging) return
+      const target = e.target
+      if (target instanceof Element && target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return
+      e.preventDefault()
+      handleDeletePocket()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [selection, dragging, handleDeletePocket])
 
   const handleEditingLabelKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') commitEditingLabel()

@@ -593,6 +593,27 @@ describe('BinEditor access pockets', () => {
     expect(onChange.mock.calls.at(-1)![0][0].length).toBe(40)
   })
 
+  it('deletes only the selected pocket with Delete, without intercepting field editing', () => {
+    const onChange = vi.fn()
+    render(<PocketEditor initial={[pocket(), pocket({ id: 'p2', x: 60 })]} onChange={onChange} />)
+    fireEvent.keyDown(window, { key: 'Delete' })
+    expect(screen.getByTestId('access-pocket-p1')).toBeTruthy()
+    fireEvent.mouseDown(screen.getByTestId('access-pocket-p1'))
+    fireEvent.mouseUp(window)
+    fireEvent.keyDown(screen.getByLabelText('Length (mm)'), { key: 'Delete' })
+    fireEvent.keyDown(screen.getByLabelText('Opening edge'), { key: 'Delete' })
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.getByTestId('access-pocket-p1')).toBeTruthy()
+
+    fireEvent.keyDown(window, { key: 'Delete' })
+
+    expect(screen.queryByTestId('access-pocket-p1')).toBeNull()
+    expect(screen.getByTestId('access-pocket-p2')).toBeTruthy()
+    expect(screen.queryByLabelText('Access pocket settings')).toBeNull()
+    fireEvent.keyDown(window, { key: 'Delete' })
+    expect(screen.getByTestId('access-pocket-p2')).toBeTruthy()
+  })
+
   it('moves a pocket with the mouse', () => {
     const advanceFrame = frameController()
     const onChange = vi.fn()

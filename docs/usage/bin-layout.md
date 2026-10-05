@@ -134,7 +134,8 @@ The panel edits the selected pocket:
   radius.
 - **Geometry** (rectangles only): **Corner radius** (plan-view) and **Bottom
   radius** (the curved floor-to-wall and floor-to-end transition).
-- **Duplicate** and **Delete**.
+- **Duplicate** and **Delete**. Press **Delete** to remove the selected pocket
+  from the canvas; the shortcut is inactive while editing a field.
 
 Finishing widens the opening outward, so it never shrinks the usable space. The
 canvas draws the nominal opening as a solid outline and the finishing envelope
