@@ -6,6 +6,11 @@ The bin layout editor is where you arrange tools inside a gridfinity bin and con
 
 The editor has three areas: a configuration sidebar on the left, a 2D canvas in the centre, and a 3D preview on the right. A horizontal tool library strip sits above the canvas and preview.
 
+Click the **3D Preview** header to collapse it and give the 2D canvas more room.
+Click **3D** in the narrow rail on the right to restore the preview. Both controls
+work with Enter or Space. Collapsing keeps your current 2D editor state; the
+preview reopens with its default camera view.
+
 The 2D canvas shows the 42mm Gridfinity grid over both the bin floor and tool
 outlines. Grid lines stay visible when zoomed out and do not block tool selection
 or dragging. Half-grid bases also show lighter, dashed 21mm subdivisions.

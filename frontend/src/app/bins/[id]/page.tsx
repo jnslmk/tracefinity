@@ -12,7 +12,7 @@ import { getBin, updateBin, generateBinStl, getBinStlUrl, getBinZipUrl, getBinTh
 import { buildBinConfig, createPartialBinsValues, getDefaultBinConfig, resetDefaultBinConfig, saveDefaultBinConfig } from '@/lib/binDefaults'
 import { downloadExport } from '@/lib/download'
 import type { AccessPocket, BinConfig, BinData, HeightProposal, PlacedTool, TextLabel } from '@/types'
-import { Download, Loader2, Package, ChevronDown, Check, TriangleAlert } from 'lucide-react'
+import { Download, Loader2, Package, ChevronDown, ChevronLeft, ChevronRight, Check, TriangleAlert } from 'lucide-react'
 import { Breadcrumb } from '@/components/Breadcrumb'
 import { Alert } from '@/components/Alert'
 import { useDebouncedSave } from '@/hooks/useDebouncedSave'
@@ -93,6 +93,7 @@ export default function BinPage() {
     && packedLayout.sizingSettings === sizingSettings
   const [isDragging, setIsDragging] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
+  const [previewVisible, setPreviewVisible] = useState(true)
   const [defaultsStatus, setDefaultsStatus] = useState<string | null>(null)
   const defaultsStatusTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const exportRef = useRef<HTMLDivElement>(null)
@@ -772,7 +773,7 @@ export default function BinPage() {
           />
         </div>
 
-        {/* canvas + 3D preview side by side, equal width */}
+        {/* canvas + collapsible 3D preview */}
         <div className="flex-1 min-h-0 flex">
           {/* canvas */}
           <div className="flex-1 min-w-0 relative bg-inset overflow-hidden" data-testid="bin-editor">
@@ -829,12 +830,30 @@ export default function BinPage() {
             )}
           </div>
 
-          {/* 3D preview - same width as canvas */}
-          <div className="flex-1 min-w-0 bg-surface border-l border-border flex flex-col">
-            <div className="px-3 py-2 border-b border-border flex-shrink-0">
-              <h3 className="text-[10px] font-semibold text-text-muted uppercase tracking-[1.5px]">3D Preview</h3>
-            </div>
-            <div className="flex-1 min-h-0 relative bg-inset">
+          {/* 3D preview collapses to a restore rail */}
+          <div className={cn("bg-surface border-l border-border flex flex-col", previewVisible ? "flex-1 min-w-0" : "w-12 flex-shrink-0")}>
+            <button
+              type="button"
+              onClick={() => setPreviewVisible(visible => !visible)}
+              aria-expanded={previewVisible}
+              aria-controls="bin-3d-preview"
+              aria-label={previewVisible ? 'Hide 3D preview' : 'Show 3D preview'}
+              title={previewVisible ? 'Hide 3D preview' : 'Show 3D preview'}
+              className={cn("border-b border-border flex-shrink-0 flex items-center text-text-secondary hover:bg-glass-hover hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2 cursor-pointer", previewVisible ? "justify-between gap-2 px-3 py-2" : "flex-col gap-1 py-2")}
+            >
+              {previewVisible ? (
+                <>
+                  <span className="text-[10px] font-semibold uppercase tracking-[1.5px]">3D Preview</span>
+                  <ChevronRight className="w-4 h-4" aria-hidden="true" />
+                </>
+              ) : (
+                <>
+                  <ChevronLeft className="w-4 h-4" aria-hidden="true" />
+                  <span className="text-[11px] font-medium">3D</span>
+                </>
+              )}
+            </button>
+            <div id="bin-3d-preview" hidden={!previewVisible} className="flex-1 min-h-0 relative bg-inset">
               {generating && (
                 <div className="absolute inset-x-0 bottom-0 z-10">
                   <div className="h-1 w-full overflow-hidden bg-blue-950">
@@ -842,7 +861,7 @@ export default function BinPage() {
                   </div>
                 </div>
               )}
-              {stlUrlWithVersion ? (
+              {previewVisible && stlUrlWithVersion ? (
                 <BinPreview3D stlUrl={stlUrlWithVersion} splitUrls={splitUrlsWithVersion || undefined} insertUrl={insertUrlWithVersion || undefined} />
               ) : (
                 <div className="flex flex-col items-center justify-center h-full text-text-muted text-xs gap-2">
