@@ -25,6 +25,7 @@ lint-backend:
 
 lint-frontend:
 	cd frontend && pnpm run lint
+	cd frontend && pnpm exec next typegen
 	cd frontend && pnpm exec tsc --noEmit
 
 lint-fix:
