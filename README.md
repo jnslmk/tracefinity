@@ -190,7 +190,7 @@ helm install tracefinity oci://ghcr.io/tracefinity/charts/tracefinity \
 
 ### From Source
 
-Prerequisites: Python 3.12+, Node.js 20+, [pnpm](https://pnpm.io/installation)
+Prerequisites: Python 3.12+, Node.js 22.13+, [pnpm](https://pnpm.io/installation)
 
 The backend includes the pinned native `packingsolver==0.1.1056` dependency,
 which requires Python 3.12+. Auto-layout defaults to Automatic, running the
