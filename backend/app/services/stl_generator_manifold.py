@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 from app.constants import GF_GRID
 
 # Bump when geometry changes so saved previews and exports regenerate.
-STL_GEOMETRY_VERSION = 6
+STL_GEOMETRY_VERSION = 7
 
 GF_HALF_GRID = GF_GRID / 2  # 21mm
 GF_HEIGHT_UNIT = 7.0

@@ -41,4 +41,22 @@ describe('per-feature depth controls', () => {
     fireEvent.blur(depth)
     expect(onSetHoleDepthOverride).toHaveBeenCalledWith('placed', 'hole', 7.25)
   })
+
+  it('switches a placement between derived and custom depth in automatic mode', () => {
+    const onSetDepthMode = vi.fn()
+    render(<BinEditorToolbar {...props} binDepthMode="automatic" onSetDepthMode={onSetDepthMode} />)
+    // the fixture carries a stored override, so it starts on Custom
+    expect(screen.getByRole('button', { name: 'Custom' }).getAttribute('aria-pressed')).toBe('true')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Automatic' }))
+    expect(onSetDepthMode).toHaveBeenCalledWith('placed', 'automatic')
+    fireEvent.click(screen.getByRole('button', { name: 'Custom' }))
+    expect(onSetDepthMode).toHaveBeenLastCalledWith('placed', 'custom')
+  })
+
+  it('hides the per-tool mode control outside automatic mode', () => {
+    render(<BinEditorToolbar {...props} binDepthMode="uniform" onSetDepthMode={vi.fn()} />)
+    expect(screen.queryByRole('button', { name: 'Automatic' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Custom' })).toBeNull()
+  })
 })

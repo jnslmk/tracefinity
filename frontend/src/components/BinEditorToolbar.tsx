@@ -101,6 +101,8 @@ interface Props {
   maxCutoutDepth: number
   onSetCutoutDepthOverride: (toolId: string, depth: number | null) => void
   onSetHoleDepthOverride: (toolId: string, holeId: string, depth: number | null) => void
+  binDepthMode?: 'automatic' | 'uniform' | null
+  onSetDepthMode?: (toolId: string, mode: 'automatic' | 'custom') => void
 }
 
 const tbBtn = 'flex items-center gap-1.5 px-2.5 py-1.5 rounded-[7px] text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap'
@@ -133,7 +135,13 @@ export function BinEditorToolbar({
   maxCutoutDepth,
   onSetCutoutDepthOverride,
   onSetHoleDepthOverride,
+  binDepthMode,
+  onSetDepthMode,
 }: Props) {
+  const selectedToolUsesCustomDepth = !!selectedTool && (
+    selectedTool.depth_mode === 'custom'
+    || (selectedTool.depth_mode == null && selectedTool.depth_override != null)
+  )
   return (
     <>
       <button
@@ -233,13 +241,36 @@ export function BinEditorToolbar({
               className="w-16 h-1 accent-accent"
             />
           )}
+          {binDepthMode === 'automatic' && onSetDepthMode && (
+            <div
+              className="flex items-center rounded-[6px] overflow-hidden border border-glass-border"
+              title="Automatic derives the shallowest depth that still clears the bin stacked on top; Custom pins this tool's own depth."
+            >
+              <button
+                type="button"
+                onClick={() => onSetDepthMode(selectedTool.id, 'automatic')}
+                aria-pressed={!selectedToolUsesCustomDepth}
+                className={`px-2 py-1 text-[10px] font-medium transition-colors cursor-pointer ${!selectedToolUsesCustomDepth ? 'bg-accent text-white' : 'text-text-muted hover:text-text-secondary'}`}
+              >
+                Automatic
+              </button>
+              <button
+                type="button"
+                onClick={() => onSetDepthMode(selectedTool.id, 'custom')}
+                aria-pressed={selectedToolUsesCustomDepth}
+                className={`px-2 py-1 text-[10px] font-medium transition-colors cursor-pointer ${selectedToolUsesCustomDepth ? 'bg-accent text-white' : 'text-text-muted hover:text-text-secondary'}`}
+              >
+                Custom
+              </button>
+            </div>
+          )}
           <div
             className="flex items-center gap-1 text-[10px] text-text-muted"
             title={`Cutout depth (mm). Default: ${Math.min(maxCutoutDepth, Math.max(5, defaultCutoutDepth)).toFixed(2)}mm. Max: ${maxCutoutDepth.toFixed(2)}mm.`}
           >
             <span>Depth</span>
             <DepthInput
-              value={selectedTool.depth_override}
+              value={binDepthMode === 'automatic' && !selectedToolUsesCustomDepth ? null : selectedTool.depth_override}
               defaultDepth={defaultCutoutDepth}
               maxDepth={maxCutoutDepth}
               onCommit={(d) => onSetCutoutDepthOverride(selectedTool.id, d)}

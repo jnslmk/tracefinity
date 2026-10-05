@@ -71,6 +71,9 @@ export default function BinPage() {
   const doGenerateRef = useRef<() => void>(() => {})
   const [smoothedToolIds, setSmoothedToolIds] = useState<Set<string>>(new Set())
   const [smoothLevels, setSmoothLevels] = useState<Map<string, number>>(new Map())
+  // shared tool measurements edited elsewhere; automatic depths follow them
+  const [toolMeasurements, setToolMeasurements] = useState<Record<string, number | null>>({})
+  const measurementRequestRef = useRef(0)
 
   const smoothLevelTimerRef = useRef<NodeJS.Timeout | null>(null)
 
@@ -233,6 +236,7 @@ export default function BinPage() {
         setHistoryRevision(revision => revision + 1)
         setSmoothedToolIds(new Set(tools.filter(t => t.smoothed).map(t => t.id)))
         setSmoothLevels(new Map(tools.map(t => [t.id, t.smooth_level])))
+        setToolMeasurements(Object.fromEntries(tools.map(t => [t.id, t.thickness_mm ?? null])))
         setBinData(data)
       } catch {
         if (!cancelled) setError('Bin not found')
@@ -267,7 +271,7 @@ export default function BinPage() {
       return
     }
 
-    const key = JSON.stringify({ placedTools, config, textLabels, smoothed: [...smoothedToolIds], levels: [...smoothLevels] })
+    const key = JSON.stringify({ placedTools, config, textLabels, smoothed: [...smoothedToolIds], levels: [...smoothLevels], measurements: toolMeasurements })
     if (key === lastGenerateRef.current) return
 
     if (abortRef.current) {
@@ -308,7 +312,7 @@ export default function BinPage() {
         abortRef.current = null
       }
     }
-  }, [binId, binData, placedTools, config, textLabels, smoothedToolIds, smoothLevels, gridLimitError])
+  }, [binId, binData, placedTools, config, textLabels, smoothedToolIds, smoothLevels, toolMeasurements, gridLimitError])
 
   useEffect(() => {
     doGenerateRef.current = doGenerate
@@ -362,7 +366,26 @@ export default function BinPage() {
     return () => {
       if (generateTimeoutRef.current) clearTimeout(generateTimeoutRef.current)
     }
-  }, [binData, placedTools, config, textLabels, smoothedToolIds, smoothLevels, doGenerate])
+  }, [binData, placedTools, config, textLabels, smoothedToolIds, smoothLevels, toolMeasurements, doGenerate])
+
+  // measurement edits happen in the tool editor; refresh on focus so previews
+  // and exports do not keep a stale thickness. A newer request always wins, so
+  // a slow response can never overwrite a fresher measurement set.
+  useEffect(() => {
+    if (loading || !binData || binData.imported_model || isDragging) return
+    const refresh = async () => {
+      const token = ++measurementRequestRef.current
+      try {
+        const tools = await listTools()
+        if (token !== measurementRequestRef.current) return
+        setToolMeasurements(Object.fromEntries(tools.map(t => [t.id, t.thickness_mm ?? null])))
+      } catch {
+        // keep the last known measurements; the next focus retries
+      }
+    }
+    window.addEventListener('focus', refresh)
+    return () => window.removeEventListener('focus', refresh)
+  }, [loading, binData, isDragging])
 
   const handlePlacedToolsChange = useCallback((updated: PlacedTool[], label = 'Edit tools') => {
     markAction(label)
@@ -770,6 +793,7 @@ export default function BinPage() {
                 stackingLip={config.stacking_lip}
                 defaultCutoutDepth={config.cutout_depth}
                 maxCutoutDepth={calcMaxCutoutDepth(config.height_units)}
+                depthMode={config.cutout_depth_mode}
                 halfGridBase={config.half_grid_base}
                 cutoutClearance={config.cutout_clearance}
                 gridSizingMode={gridSizingMode}

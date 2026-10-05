@@ -101,6 +101,7 @@ from app.services.imported_bins import (
 )
 from app.services.photo_checks import check_photo, extract_focal_length_35mm
 from app.services.photo_station_store import PhotoStationStore
+from app.services.pocket_depths import mating_increment_mm, needs_mating_increment, resolved_overrides
 from app.services.polygon_scaler import PolygonScaler, ScaledFingerHole, ScaledPolygon
 from app.services.project_service import (
     add_bin_to_project,
@@ -595,7 +596,10 @@ def _build_bin_from_tools(
             interior_rings=list(tool.interior_rings),
         ))
 
-    bc = BinConfig(**default_config.model_dump(exclude={"text_labels"}), text_labels=[]) if default_config else BinConfig()
+    if default_config is None:
+        # a brand new bin derives per-tool depths unless saved defaults say otherwise
+        default_config = BinDefaults(cutout_depth_mode="automatic")
+    bc = BinConfig(**default_config.model_dump(exclude={"text_labels"}), text_labels=[])
     if all_points_mm:
         all_xs = [p[0] for p in all_points_mm]
         all_ys = [p[1] for p in all_points_mm]
@@ -2608,13 +2612,15 @@ def generate_bin_stl(request: Request, bin_id: str, user_id: str = Depends(get_u
 
     bc = bin_data.bin_config
 
-    # include source tool smoothed state in hash so toggling invalidates cache
+    # include source tool smoothed state and measured thickness in the hash so
+    # toggling either invalidates cache; thickness drives automatic depths
     smoothed_flags = {}
     for pt in bin_data.placed_tools:
         src = user_tools.get(pt.tool_id)
         smoothed_flags[pt.tool_id] = {
             "smoothed": src.smoothed if src else False,
             "smooth_level": src.smooth_level if src else 0.5,
+            "thickness_mm": src.thickness_mm if src else None,
         }
     input_data = {
         "bin_config": bc.model_dump(),
@@ -2623,8 +2629,6 @@ def generate_bin_stl(request: Request, bin_id: str, user_id: str = Depends(get_u
         "smoothed_flags": smoothed_flags,
     }
     input_hash = hashlib.md5(json.dumps(input_data, sort_keys=True, default=str).encode()).hexdigest()
-
-    scaled = generation_polygons(bin_data, user_tools.all())
 
     gen_req = GenerateRequest(
         grid_x=bc.grid_x,
@@ -2638,6 +2642,8 @@ def generate_bin_stl(request: Request, bin_id: str, user_id: str = Depends(get_u
         rim_units=bc.rim_units,
         wall_thickness=bc.wall_thickness,
         cutout_depth=bc.cutout_depth,
+        cutout_depth_mode=bc.cutout_depth_mode,
+        stacking_clearance_mm=bc.stacking_clearance_mm,
         cutout_clearance=bc.cutout_clearance,
         insert_enabled=bc.insert_enabled,
         insert_height=bc.insert_height,
@@ -2652,6 +2658,12 @@ def generate_bin_stl(request: Request, bin_id: str, user_id: str = Depends(get_u
         half_grid_base=bc.half_grid_base,
         access_pockets=bc.access_pockets,
     )
+
+    # a standalone export has no bin above it: the bin's own shell provides the
+    # authoritative mating increment for its automatic depths
+    increment = mating_increment_mm(gen_req) if needs_mating_increment(bc, bin_data.placed_tools) else None
+    overrides = resolved_overrides(bc, bin_data.placed_tools, user_tools.all(), increment)
+    scaled = generation_polygons(bin_data, user_tools.all(), overrides=overrides)
 
     response = _run_generate(scaled, gen_req, bin_id, up, input_hash, user_id, user_bins)
 

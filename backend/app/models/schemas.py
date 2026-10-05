@@ -196,6 +196,10 @@ class PolygonsRequest(BaseModel):
     polygons: list[Polygon]
 
 
+CutoutDepthMode = Literal["automatic", "uniform"]
+PlacementDepthMode = Literal["automatic", "custom"]
+
+
 class BinParams(BaseModel):
     grid_x: float = 2
     grid_y: float = 2
@@ -208,6 +212,12 @@ class BinParams(BaseModel):
     rim_units: int = 0  # extra height units (x7mm) the wall/lip rises above the floor face
     wall_thickness: float = 1.6
     cutout_depth: float = 20.0
+    # "automatic" derives the shallowest stacking-safe pocket per measured tool;
+    # "uniform" applies cutout_depth to every tool; None is a pre-feature record
+    # that keeps honouring its stored per-placement overrides.
+    cutout_depth_mode: CutoutDepthMode | None = None
+    # vertical clearance kept between a tool's top and the upper bin's underside
+    stacking_clearance_mm: float = Field(default=1.0, allow_inf_nan=False)
     cutout_clearance: float = 1.0
     insert_enabled: bool = False
     insert_height: float = 1.0
@@ -271,6 +281,13 @@ class BinParams(BaseModel):
     def validate_clearance(cls, v: float) -> float:
         if v < 0 or v > 10:
             raise ValueError("clearance must be between 0 and 10mm")
+        return v
+
+    @field_validator("stacking_clearance_mm")
+    @classmethod
+    def validate_stacking_clearance(cls, v: float) -> float:
+        if v < 0 or v > 10:
+            raise ValueError("stacking clearance must be between 0 and 10mm")
         return v
 
     @field_validator("insert_height")
@@ -812,6 +829,9 @@ class PlacedTool(BaseModel):
     rotation: float = 0.0  # degrees, applied on top of library points
     pinned: bool = False  # excluded from automatic movement, not manual editing
     depth_override: float | None = None  # mm; None = use bin_config.cutout_depth
+    # None is a pre-feature placement: it keeps a stored override, otherwise it
+    # follows the bin's automatic depth.
+    depth_mode: PlacementDepthMode | None = None
 
 
 class BinConfig(BinDefaults):

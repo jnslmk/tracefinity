@@ -45,4 +45,37 @@ describe('bin depth controls', () => {
     fireEvent.blur(height)
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ height_units: 2, cutout_depth: 5 }))
   })
+
+  it('defaults new bins to automatic depths and edits the shared stacking clearance', () => {
+    const onChange = vi.fn()
+    render(<BinConfigurator config={FACTORY_BIN_CONFIG} onChange={onChange} />)
+    const mode = screen.getByLabelText('Cutout depths') as HTMLSelectElement
+    expect(mode.value).toBe('automatic')
+
+    const clearance = row('Stacking Clearance').getByRole('spinbutton')
+    // accepts a clearance above the old 5mm control ceiling, up to the API limit
+    fireEvent.change(clearance, { target: { value: '8' } })
+    fireEvent.blur(clearance)
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ stacking_clearance_mm: 8 }))
+
+    fireEvent.change(mode, { target: { value: 'uniform' } })
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ cutout_depth_mode: 'uniform' }))
+  })
+
+  it('hides the automatic-only stacking clearance control in uniform mode', () => {
+    render(<BinConfigurator config={{ ...FACTORY_BIN_CONFIG, cutout_depth_mode: 'uniform' }} onChange={vi.fn()} />)
+    expect(screen.getByLabelText('Cutout depths')).toBeTruthy()
+    expect(screen.queryByText('Stacking Clearance')).toBeNull()
+  })
+
+  it('keeps a pre-feature bin on its existing per-tool depths until the user chooses', () => {
+    const onChange = vi.fn()
+    render(<BinConfigurator config={{ ...FACTORY_BIN_CONFIG, cutout_depth_mode: null }} onChange={onChange} />)
+    const mode = screen.getByLabelText('Cutout depths') as HTMLSelectElement
+    expect(mode.value).toBe('legacy')
+    expect(screen.getByRole('option', { name: 'Existing per-tool depths' })).toBeTruthy()
+
+    fireEvent.change(mode, { target: { value: 'automatic' } })
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ cutout_depth_mode: 'automatic' }))
+  })
 })

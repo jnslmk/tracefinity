@@ -114,3 +114,21 @@ work. Floor occupancy is the root-footprint union, never summed stacked members.
 Fit assessments and preview revision keys are derived, never durable caches.
 Refresh current shared tool/bin data before assessing or generating; pending or
 failed STL loading must remain explicitly distinct from verified geometry.
+
+## Automatic cutout depths
+
+`BinConfig.cutout_depth_mode` is `"automatic"`, `"uniform"`, or `null`, and the
+three are not interchangeable. `null` is a record written before the field
+existed: it must keep honouring a stored `PlacedTool.depth_override`, so an
+absent mode must never be normalised to `"uniform"` on load — uniform
+deliberately ignores custom depths (they are kept, not lost). `pocket_depths.py`
+resolves each placement's depth for both export and planning; do not recompute
+it separately, and never persist a derived depth into `PlacedTool.depth_override`
+or a later mode switch turns it into a manual override.
+
+Automatic depths use the mating increment from `assess_printed_bin`, not
+`wall_top + rim * 7`. A raised rim changes the increment by less than a full
+unit (the upper base settles on the collar), so nominal arithmetic over-cuts by
+millimetres. `cutout_depth` remains the fallback for a tool with no
+`Tool.thickness_mm`; that fallback is unverified, so the assessment stays
+`uncertain` and no stacking clearance is claimed for it.

@@ -65,6 +65,39 @@ describe('bin defaults', () => {
     expect(defaults.magnet_diameter).toBe(6)
   })
 
+  it('defaults new bins to automatic per-tool depths with 1mm stacking clearance', () => {
+    const defaults = getDefaultBinConfig()
+
+    expect(defaults.cutout_depth_mode).toBe('automatic')
+    expect(defaults.stacking_clearance_mm).toBe(1)
+  })
+
+  it('keeps pre-feature saved defaults on uniform depths until the user opts in', () => {
+    // a defaults object written before depth modes existed has no mode key
+    storage.setItem(SETTINGS_KEY, JSON.stringify({
+      bedSize: 250,
+      binDefaults: { cutout_depth: 12, magnet_diameter: 6.2 },
+    }))
+
+    const defaults = getDefaultBinConfig()
+
+    expect(defaults.cutout_depth_mode).toBe('uniform')
+    expect(defaults.cutout_depth).toBe(12)
+    expect(defaults.bed_size).toBe(250)
+  })
+
+  it('honours a depth mode the user explicitly saved', () => {
+    storage.setItem(SETTINGS_KEY, JSON.stringify({
+      bedSize: 256,
+      binDefaults: { cutout_depth_mode: 'automatic', stacking_clearance_mm: 2 },
+    }))
+
+    const defaults = getDefaultBinConfig()
+
+    expect(defaults.cutout_depth_mode).toBe('automatic')
+    expect(defaults.stacking_clearance_mm).toBe(2)
+  })
+
   it('saves and restores magnet defaults', () => {
     saveDefaultBinConfig(buildBinConfig({
       magnet_diameter: 6.2,

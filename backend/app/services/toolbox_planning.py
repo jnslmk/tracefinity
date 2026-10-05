@@ -7,6 +7,14 @@ from copy import copy, deepcopy
 
 from app.models.schemas import BinPreviewTool, BinSummary, GenerateRequest
 from app.services.bin_service import sync_placed_tools
+from app.services.pocket_depths import (
+    automatic_required_depth_mm,
+    mating_increment_mm,
+    max_supported_depth_mm,
+    needs_mating_increment,
+    placement_is_custom,
+    resolved_overrides,
+)
 from app.services.polygon_scaler import PolygonScaler, ScaledFingerHole, ScaledPolygon
 from app.services.stl_generator_manifold import (
     GF_BASE_HEIGHT,
@@ -37,16 +45,17 @@ def support_problem(lower, upper, bins, physical):
     return physical["support_error"]
 
 
-def generation_polygons(bin_data, tools, prepare=True):
+def generation_polygons(bin_data, tools, prepare=True, overrides=None):
     scaler = PolygonScaler()
     polygons = []
     for placed in bin_data.placed_tools:
         source = tools.get(placed.tool_id)
+        depth_override = placed.depth_override if overrides is None else overrides.get(placed.id, placed.depth_override)
         polygon = ScaledPolygon(
             placed.id, [(p.x, p.y) for p in placed.points], placed.name,
             [ScaledFingerHole.from_finger_hole(h) for h in placed.finger_holes],
             [[(p.x, p.y) for p in ring] for ring in placed.interior_rings],
-            depth_override=placed.depth_override,
+            depth_override=depth_override,
         )
         polygons.append(scaler.prepare_for_generation(
             polygon, bin_data.bin_config.cutout_clearance,
@@ -124,18 +133,25 @@ def _assess_bin(bin_data, tools, gap=0, upper_config=None, relative_rotation=0, 
     request = GenerateRequest.model_validate({
         **config.model_dump(), "text_labels": [label.model_dump() for label in config.text_labels + bin_data.text_labels],
     })
+    upper_request = GenerateRequest.model_validate(upper_config.model_dump()) if upper_config else None
+    # derived automatic depths need the real mating increment above the bin
+    increment = (
+        mating_increment_mm(request, upper_request, relative_rotation)
+        if needs_mating_increment(config, bin_data.placed_tools) else None
+    )
+    overrides = resolved_overrides(config, bin_data.placed_tools, tools, increment)
     if prepared is None:
-        prepared = generation_polygons(bin_data, tools)
+        prepared = generation_polygons(bin_data, tools, overrides=overrides)
     else:
         # Shape preparation is depth-independent. Never mutate shared prepared
         # polygons when trying a candidate with different pocket overrides.
         prepared = [copy(polygon) for polygon in prepared]
         for polygon, placed in zip(prepared, bin_data.placed_tools):
-            polygon.depth_override = placed.depth_override
+            polygon.depth_override = overrides.get(placed.id, placed.depth_override)
     geometry = assess_printed_bin(
         prepared,
         generation_polygons(bin_data, tools, prepare=False), request,
-        GenerateRequest.model_validate(upper_config.model_dump()) if upper_config else None, relative_rotation,
+        upper_request, relative_rotation,
     )
     envelopes, missing, violations = [], [], []
     for placed in bin_data.placed_tools:
@@ -143,7 +159,9 @@ def _assess_bin(bin_data, tools, gap=0, upper_config=None, relative_rotation=0, 
         thickness = tool.thickness_mm if tool else None
         if thickness is None:
             missing.append(placed.tool_id)
-        physical = bin_vertical_geometry(config, placed.depth_override)
+        override = overrides.get(placed.id, placed.depth_override)
+        physical = bin_vertical_geometry(config, override)
+        effective_depth = physical["effective_depth_mm"]
         physical["stack_increment_mm"] = geometry["stack_increment_mm"]
         seating_error = geometry["seating_errors"].get(placed.id)
         if seating_error:
@@ -168,6 +186,26 @@ def _assess_bin(bin_data, tools, gap=0, upper_config=None, relative_rotation=0, 
         if clearance is not None and clearance < -1e-7:
             violations.append({"code": "tool_clearance", "tool_id": placed.tool_id,
                                "message": f"{placed.name} exceeds the upper-bin underside clearance", "clearance_mm": clearance})
+        if config.cutout_depth_mode == "automatic" and thickness is not None:
+            mating_increment = geometry["stack_increment_mm"]
+            required = automatic_required_depth_mm(config, thickness, mating_increment)
+            limit = max_supported_depth_mm(config)
+            achieved = None if physical["resting_z_mm"] is None else mating_increment - physical["resting_z_mm"] - thickness
+            shortfall = None if achieved is None else achieved - config.stacking_clearance_mm
+            if required > limit + 1e-9:
+                violations.append({
+                    "code": "automatic_depth_unsupported", "tool_id": placed.tool_id,
+                    "message": f"{placed.name} needs a {required:.2f}mm pocket to clear the bin above by "
+                               f"{config.stacking_clearance_mm:g}mm; the protected floor allows {limit:.2f}mm",
+                    "clearance_mm": shortfall,
+                })
+            elif placement_is_custom(placed) and effective_depth is not None and effective_depth < required - 1e-9:
+                violations.append({
+                    "code": "custom_depth_too_shallow", "tool_id": placed.tool_id,
+                    "message": f"{placed.name} sits in a {effective_depth:.2f}mm custom pocket; "
+                               f"{required:.2f}mm keeps the {config.stacking_clearance_mm:g}mm stacking clearance",
+                    "clearance_mm": shortfall,
+                })
     known = [e for e in envelopes if e["clearance_mm"] is not None]
     limiting = min(known, key=lambda e: e["clearance_mm"]) if known else None
     if not config.stacking_lip:
@@ -229,7 +267,7 @@ def height_proposals(bin_data, tools, gap=0):
                         candidate.bin_config.cutout_depth = max(0.25, requested)
                         for placed in candidate.placed_tools:
                             envelope = measured_by_id.get(placed.id)
-                            if placed.depth_override is not None and envelope:
+                            if placement_is_custom(placed) and placed.depth_override is not None and envelope:
                                 depth = max(placed.depth_override, envelope["thickness_mm"] + gap)
                                 if depth != placed.depth_override:
                                     changes.append({"id": placed.id, "from_mm": placed.depth_override, "to_mm": depth})
@@ -243,7 +281,7 @@ def height_proposals(bin_data, tools, gap=0):
                         changes = []
                         for placed, original in zip(candidate.placed_tools, bin_data.placed_tools):
                             envelope = measured_by_id.get(placed.id)
-                            if original.depth_override is not None and envelope:
+                            if placement_is_custom(original) and original.depth_override is not None and envelope:
                                 placed.depth_override = max(original.depth_override, envelope["thickness_mm"] + gap + mating_drop)
                                 if placed.depth_override != original.depth_override:
                                     changes.append({"id": placed.id, "from_mm": original.depth_override, "to_mm": placed.depth_override})

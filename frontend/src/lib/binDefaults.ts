@@ -17,6 +17,9 @@ export const FACTORY_BIN_CONFIG: BinConfig = {
   rim_units: 0,
   wall_thickness: 1.6,
   cutout_depth: 20,
+  // new bins derive each measured tool's shallowest stacking-safe depth
+  cutout_depth_mode: 'automatic',
+  stacking_clearance_mm: 1.0,
   cutout_clearance: 1.0,
   cutout_chamfer: 0,
   insert_enabled: false,
@@ -54,9 +57,13 @@ export function binDefaultsFromConfig(config: Partial<BinConfig>): BinDefaults {
 
 export function getDefaultBinConfig(): BinConfig {
   const settings = getSettings()
+  const saved = settings.binDefaults
   return buildBinConfig({
-    ...(settings.binDefaults || {}),
+    ...(saved || {}),
     bed_size: settings.bedSize,
+    // a defaults object saved before cutout depth modes existed has no mode;
+    // keep its uniform behaviour until the user opts in
+    ...(saved && saved.cutout_depth_mode == null ? { cutout_depth_mode: 'uniform' as const } : {}),
   })
 }
 

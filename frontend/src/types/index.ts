@@ -165,6 +165,12 @@ export interface BinDefaults {
   rim_units: number
   wall_thickness: number
   cutout_depth: number
+  /** 'automatic' derives each measured tool's shallowest stacking-safe depth;
+   *  'uniform' applies cutout_depth to every tool; null is a pre-feature bin
+   *  that keeps honouring its stored per-placement overrides. */
+  cutout_depth_mode: 'automatic' | 'uniform' | null
+  /** Clearance kept between a tool's top and the underside of the bin above. */
+  stacking_clearance_mm: number
   cutout_clearance: number
   cutout_chamfer: number
   insert_enabled: boolean
@@ -340,6 +346,9 @@ export interface PlacedTool {
   rotation: number
   pinned?: boolean
   depth_override?: number | null
+  /** 'custom' keeps depth_override; 'automatic' derives the depth; null is a
+   *  pre-feature placement that keeps a stored override, else the bin mode. */
+  depth_mode?: 'automatic' | 'custom' | null
 }
 
 /**

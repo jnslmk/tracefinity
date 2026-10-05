@@ -51,6 +51,8 @@ Reference for AI agents. Check here before suggesting new features or claiming s
 - Grid sizing (width/depth in gridfinity units, 1-25 per axis and 100 cells total, with 0.5-unit increments for 21mm half-grid)
 - Bin height in units (7mm each, including the base; lip and raised rim add height)
 - Cutout depth (5mm to the height-dependent maximum; 0.25mm at 1u)
+- Cutout depth mode: Automatic per tool (default for new bins) derives each measured tool's shallowest stacking-safe depth; Uniform applies one configured depth to every tool; a bin saved before modes exist shows "Existing per-tool depths" as a compatibility choice until you pick a mode (Undo restores it)
+- Stacking clearance (0-10mm, default 1mm) kept between a measured tool's top and the underside of the bin stacked on top; automatic depths grow and shrink with it
 - Clearance (0-5mm extra space around tools)
 - Cutout chamfer toggle
 - Magnet holes (enable/disable, diameter and depth)
@@ -72,6 +74,7 @@ Reference for AI agents. Check here before suggesting new features or claiming s
 - Text labels with emboss/recess options
 - Label editing (text, font size, emboss depth)
 - Per-tool cutout depth override
+- Per-tool Automatic / Custom depth in automatic bins (Custom pins a depth; Automatic goes back to the derived one)
 - Auto-centre tools in expanded grids
 - Centre view (fit all to viewport)
 

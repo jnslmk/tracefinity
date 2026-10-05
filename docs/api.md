@@ -97,6 +97,42 @@ the normal authentication rules and shares the SVG/STL preparation pipeline.
 - `GET /api/bins/{id}/height-planning?safety_clearance_mm=0` - current loaded-bin assessment and inspectable deeper-pocket / raised-rim alternatives
 - `POST /api/bins/{id}/height-planning?safety_clearance_mm=0` - assess an unsaved `BinUpdateRequest` draft without persisting it
 
+### Cutout depth modes
+
+`BinConfig.cutout_depth_mode` selects how each placed tool's pocket depth is
+resolved. It is `"automatic"`, `"uniform"`, or `null` for a record written
+before the field existed.
+
+- `"automatic"` (default for new bins): each placement derives the shallowest
+  supported pocket depth that leaves `stacking_clearance_mm` between the tool's
+  top and the underside of the bin stacked above it. The depth follows the
+  measured `Tool.thickness_mm` and the authoritative generated mating increment
+  — not nominal lip arithmetic — so rim height, half-grid bases, insert
+  allowance and real mating drop are all accounted for. Derived depths are
+  recomputed on every assessment and generation; they are never written back as
+  manual overrides. A tool with no `thickness_mm` falls back to the configured
+  `cutout_depth` and stays explicitly unverified (assessment `uncertain`).
+- `"uniform"`: `cutout_depth` is applied to every tool. Stored per-placement
+  `depth_override` values are kept but ignored while the mode is uniform.
+- `null` (pre-feature records): a stored `depth_override` is honoured, otherwise
+  `cutout_depth` applies — exactly the behaviour before this field existed. The
+  editor shows this as the "Existing per-tool depths" option only while the bin
+  still stores no mode. It is a compatibility state, not a third mode: choosing
+  Automatic or Uniform applies immediately and Undo (editor history, which
+  snapshots the bin config) restores the previous choice.
+
+`PlacedTool.depth_mode` is `"custom"`, `"automatic"`, or `null`. A `"custom"`
+placement keeps its `depth_override`; `"automatic"` derives the depth. `null`
+keeps a stored override and otherwise follows the bin's automatic depth.
+`stacking_clearance_mm` accepts 0-10mm (finite); `cutout_depth_mode` and
+`depth_mode` reject unknown values (422).
+
+The height-planning assessment reports each envelope's calculated
+`effective_depth_mm` and remaining `clearance_mm`, plus violations
+`automatic_depth_unsupported` (the protected floor cannot seat the tool with the
+configured clearance) and `custom_depth_too_shallow` (a custom override is
+shallower than the derived requirement).
+
 Auto-layout accepts `{tool_ids, placement_ids?, clearance, bin_config?, auto_width?, fixed_placements?, algorithm?, time_budget_seconds?}` and returns
 `{placements, bounds, efficiency, unfitted_tool_ids, unfitted_placement_ids, grid_x}`.
 `tool_ids` defaults to `[]`; `placement_ids` and `bin_config` default to `null`.

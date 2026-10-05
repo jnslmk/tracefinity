@@ -178,6 +178,7 @@ export function BinConfigurator({ config, onChange, gridSizingMode, onGridSizing
   const binDepth = config.grid_y * 42
   const needsSplit = config.bed_size > 0 && (binWidth > config.bed_size || binDepth > config.bed_size)
   const sizingId = useId()
+  const depthModeId = useId()
   const exportsSeparateParts = config.partial_bins && !config.partial_bins_connect && config.partial_bins_values.some((enabled) => !enabled);
 
   return (
@@ -251,9 +252,50 @@ export function BinConfigurator({ config, onChange, gridSizingMode, onGridSizing
         }}
       />
 
+      <div className="space-y-1.5 py-2">
+        <label htmlFor={depthModeId} className="text-xs text-text-primary tracking-[0.3px]">
+          Cutout depths
+          <HelpTip text="Automatic derives each measured tool's shallowest depth that keeps it below the bin stacked on top. Uniform cuts one depth for every tool and keeps (but ignores) per-tool custom depths." />
+        </label>
+        <select
+          id={depthModeId}
+          aria-label="Cutout depths"
+          value={config.cutout_depth_mode ?? 'legacy'}
+          onChange={(e) => update({ cutout_depth_mode: e.target.value === 'legacy' ? null : e.target.value as 'automatic' | 'uniform' })}
+          className="w-full rounded bg-elevated px-2 py-1.5 text-xs text-text-primary focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          {config.cutout_depth_mode == null && (
+            <option value="legacy">Existing per-tool depths</option>
+          )}
+          <option value="automatic">Automatic per tool</option>
+          <option value="uniform">Uniform</option>
+        </select>
+        {config.cutout_depth_mode == null && (
+          <p className="text-[11px] leading-tight text-text-muted">
+            Existing per-tool depths is this bin’s saved behaviour from before depth modes.
+            Choosing a mode applies it immediately; Undo restores the existing choice.
+          </p>
+        )}
+      </div>
+
+      {config.cutout_depth_mode === 'automatic' && (
+        <SliderRow
+          label="Stacking Clearance"
+          help="Gap kept between each measured tool's top and the underside of the bin stacked on top. Automatic depths grow and shrink with it."
+          value={config.stacking_clearance_mm}
+          min={0}
+          max={10}
+          step={0.1}
+          unit="mm"
+          onChange={(v) => update({ stacking_clearance_mm: v })}
+        />
+      )}
+
       <SliderRow
         label="Cutout Depth"
-        help={`How deep the tool pocket is cut into the bin. Max ${maxCutoutDepth.toFixed(2)}mm at ${config.height_units}u height.`}
+        help={config.cutout_depth_mode === 'automatic'
+          ? `Fallback depth for tools without a measured thickness. Max ${maxCutoutDepth.toFixed(2)}mm at ${config.height_units}u height.`
+          : `How deep the tool pocket is cut into the bin. Max ${maxCutoutDepth.toFixed(2)}mm at ${config.height_units}u height.`}
         value={Math.min(Math.max(5, config.cutout_depth), maxCutoutDepth)}
         min={Math.min(5, maxCutoutDepth)}
         max={maxCutoutDepth}
@@ -261,6 +303,10 @@ export function BinConfigurator({ config, onChange, gridSizingMode, onGridSizing
         unit="mm"
         onChange={(v) => update({ cutout_depth: v })}
       />
+
+      {config.cutout_depth_mode === 'uniform' && (
+        <HintBanner>Per-tool custom depths are kept but ignored while Uniform is selected.</HintBanner>
+      )}
 
       {maxCutoutDepth < 5 && (
         <HintBanner>A 1u bin leaves only 0.25mm for a pocket. Increase Height for a deeper cutout.</HintBanner>
@@ -513,13 +559,17 @@ export function BinHeightPlanner({ binId, config, placedTools, onApply, onRemove
         {placedTools.map(placed => {
           const tool = planning?.assessment.envelopes.find(envelope => envelope.id === placed.id)
           const thickness = tool?.thickness_mm
-          const invalid = tool && (!tool.seating_verified || (tool.clearance_mm !== null && tool.clearance_mm < -1e-7))
+          const depthViolations = planning?.assessment.violations.filter(violation => violation.tool_id === placed.tool_id) ?? []
+          const invalid = tool && (!tool.seating_verified || depthViolations.length > 0 || (tool.clearance_mm !== null && tool.clearance_mm < -1e-7))
           const unknown = !tool || thickness == null || tool.clearance_mm === null
             || planning?.assessment.violations.some(violation => !violation.tool_id)
           const status = invalid ? 'Does not fit' : unknown ? 'Fit unknown' : 'Fits'
           const StatusIcon = invalid ? X : unknown ? CircleHelp : Check
-          const reason = tool && !tool.seating_verified ? 'Reposition the tool or enlarge the bin to seat it in its pocket'
-            : thickness == null ? 'Measure the tool’s thickness in its tool editor' : status
+          const depth = tool?.effective_depth_mm
+          const clearance = tool?.clearance_mm
+          const reason = depthViolations[0]?.message
+            ?? (tool && !tool.seating_verified ? 'Reposition the tool or enlarge the bin to seat it in its pocket'
+              : thickness == null ? 'Measure the tool’s thickness in its tool editor' : status)
           return (
             <li key={placed.id} className="flex items-center gap-1">
               <div className="flex-1 min-w-0">
@@ -532,6 +582,12 @@ export function BinHeightPlanner({ binId, config, placedTools, onApply, onRemove
                   <StatusIcon className="w-3 h-3 shrink-0" aria-hidden="true" />
                   {thickness == null ? '— mm · — u' : `${thickness} mm · ${Number((thickness / GF_HEIGHT_UNIT).toFixed(2))} u`}
                 </span>
+                {depth != null && (
+                  <span className="block text-[10px] text-text-muted tabular-nums"
+                    title="Calculated pocket depth and remaining clearance to the bin stacked above">
+                    {`depth ${depth.toFixed(2)} mm · clearance ${clearance == null ? '—' : clearance.toFixed(2)} mm`}
+                  </span>
+                )}
               </div>
               <button type="button" aria-label={`Remove ${tool?.name ?? placed.name} from bin`}
                 title="Remove from bin" disabled={applying} onClick={() => onRemove(placed.id)}

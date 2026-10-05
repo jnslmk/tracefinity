@@ -27,6 +27,7 @@ interface Props {
   stackingLip?: boolean
   defaultCutoutDepth: number
   maxCutoutDepth: number
+  depthMode?: 'automatic' | 'uniform' | null
   halfGridBase?: boolean
   cutoutClearance?: number
   gridSizingMode?: GridSizingMode
@@ -123,6 +124,7 @@ export function BinEditor({
   stackingLip,
   defaultCutoutDepth,
   maxCutoutDepth,
+  depthMode,
   halfGridBase,
   cutoutClearance = 0,
   gridSizingMode = 'fixed',
@@ -814,8 +816,21 @@ export function BinEditor({
 
   const setCutoutDepthOverride = (toolId: string, depth: number | null) => {
     onPlacedToolsChange(placedTools.map(t =>
-      t.id === toolId ? { ...t, depth_override: depth } : t
+      t.id === toolId ? {
+        ...t,
+        depth_override: depth,
+        // typing a depth in an automatic bin pins that tool to its own value;
+        // clearing it hands the tool back to the derived depth
+        ...(depthMode === 'automatic' ? { depth_mode: depth == null ? null : 'custom' as const } : {}),
+      } : t
     ), 'Change cutout depth')
+  }
+
+  const setDepthMode = (toolId: string, mode: 'automatic' | 'custom') => {
+    // the stored override is kept either way, so switching back restores it
+    onPlacedToolsChange(placedTools.map(t =>
+      t.id === toolId ? { ...t, depth_mode: mode } : t
+    ), 'Change cutout depth mode')
   }
 
   const setHoleDepthOverride = (toolId: string, holeId: string, depth: number | null) => {
@@ -944,6 +959,8 @@ export function BinEditor({
           maxCutoutDepth={maxCutoutDepth}
           onSetCutoutDepthOverride={setCutoutDepthOverride}
           onSetHoleDepthOverride={setHoleDepthOverride}
+          binDepthMode={depthMode}
+          onSetDepthMode={setDepthMode}
         />
         {placedTools.length > 0 && (
           <>

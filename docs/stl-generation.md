@@ -21,6 +21,34 @@ grid and independently delete small faces: dense smoothed pockets exposed that
 cleanup as holes in an otherwise watertight solid. The same conversion serves
 STL, inserts, split parts, and 3MF bodies.
 
+## Automatic per-tool depths
+
+`app/services/pocket_depths.py` is the single source of truth shared by export
+and planning. For a placement in bin mode `"automatic"` it derives
+
+```
+required_depth = wall_top - stack_increment_mm + thickness_mm + insert + stacking_clearance_mm
+```
+
+then feeds it through the pipeline's own clamps (`_resolve_pocket_depth`: the
+protected floor at `wall_top - GF_BASE_HEIGHT - 2`, the 5mm minimum except on
+very shallow bins). `stack_increment_mm` comes from `assess_printed_bin`, run on
+the lip/base solids only (`assess_printed_bin([], [], request, upper, rotation)`)
+because pocket cutouts never reach the mating surface — so a raised rim,
+half-grid base, broad-pocket fit and the real mating drop all count, and nominal
+`wall_top + rim * 7` arithmetic is not used. That increment is cached on the
+geometry that determines it.
+
+The derived value is applied as a `depth_override` on an in-memory
+`ScaledPolygon`; it is never written back to `PlacedTool.depth_override`, so
+recomputing on a measurement, placement or bin-geometry change cannot silently
+turn a derived depth into a manual one. Unknown `thickness_mm` keeps the
+configured `cutout_depth` and the assessment stays `uncertain`.
+
+`POST /api/bins/{id}/generate` includes the source tools' measured thickness in
+its cache key, so editing a shared measurement invalidates and regenerates saved
+previews and exports.
+
 ## Access pockets
 
 Bin-local finger-access pockets (`access_pockets` on `BinConfig` /
