@@ -36,6 +36,21 @@ When a `GOOGLE_API_KEY` is set, a Gemini image model is used for tracing. The mo
 - `gemini-3-pro-image-preview` (default in Docker)
 - `gemini-2.5-flash-image` (faster, needs alignment)
 
+When `OPENROUTER_API_KEY` is set, the same tracing pipeline can call a
+vision-capable image-generation model through OpenRouter. Configure its exact
+OpenRouter model slug with `OPENROUTER_IMAGE_MODEL`; OpenRouter model support
+does not imply that every image model can generate a pixel-aligned mask. Verify
+output dimensions, silhouette fidelity, latency, and cost on representative
+photos before adopting a different model. Manual mask upload and local tracers
+remain alternatives.
+
+The built-in Gemini prompts and the copied manual-mask prompt explicitly exclude
+the reference sheet, including blue/tinted or shadowed paper. They also request
+complete cutter/plier silhouettes (jaws, pivot, metal shanks, and both handles),
+including dark or reflective metal, while keeping genuine gaps white. Re-trace
+existing images to use the updated instructions; inspect the mask before saving,
+since prompt instructions do not guarantee complete outlines.
+
 ## Manual mask upload
 
 If automatic tracing produces poor results, you can upload your own mask. The full workflow:

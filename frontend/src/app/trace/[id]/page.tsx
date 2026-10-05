@@ -26,7 +26,12 @@ const PAPER_SIZE_OPTIONS: { value: PaperSize; label: string }[] = [
 
 const MASK_PROMPT = `Generate a pure black and white silhouette mask of ONLY the tools/objects in this image.
 - Tools should be solid BLACK (#000000)
+- Include every visible tool part regardless of color, material, brightness, or reflections, including dark or shiny metal that blends into the background
+- For wire cutters and pliers, include the complete cutting jaws/head, pivot, metal shanks, and both handles, not just the colored grips. Preserve their exact photographed shape and open/closed position, not a simplified generic icon. Keep genuine gaps between jaws and handles white
 - Background should be solid WHITE (#FFFFFF)
+- The reference paper/sheet is BACKGROUND, never a tool or part of a tool. Keep it pure white even if it looks blue, grey, tinted, shadowed, or partly covered by tools
+- Never output the paper's rectangular outline as a black shape or merge it with a tool resting on it
+- Trace only each tool's own visible silhouette; exposed paper around and between tool parts must remain white
 - No shadows, gradients, or gray tones
 - Sharp, clean edges
 - Output ONLY the mask image, no text or explanation`

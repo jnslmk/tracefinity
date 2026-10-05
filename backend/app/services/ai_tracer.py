@@ -27,6 +27,8 @@ from app.services.tracer_registry import (
 MASK_PROMPT_PRO = """Create a black and white mask of this image.
 
 CRITICAL: The output image MUST be EXACTLY {width}x{height} pixels - the same as the input.
+The reference paper/sheet is BACKGROUND, never a tool or part of a tool. Keep it pure white even if it looks blue, grey, tinted, shadowed, or partly covered by tools. Never output its rectangular outline as a black shape or merge it with a tool resting on it. Trace only the tool's own visible silhouette; exposed paper around and between tool parts must remain white.
+Include every visible part of each tool regardless of color, material, brightness, or reflections, including dark or shiny metal that blends into the background. For wire cutters and pliers, include the complete cutting jaws/head, pivot, metal shanks, and both handles, not just the colored grips. Preserve their exact photographed shape and open/closed position; do not replace them with a simplified generic icon. Keep genuine gaps between jaws and handles white.
 
 Instructions:
 1. Output dimensions: {width} pixels wide, {height} pixels tall (MANDATORY)
@@ -40,6 +42,8 @@ Output a {width}x{height} pixel image with a black silhouette for every object o
 # gemini-2.5-flash ignores dimension requests and returns arbitrary sizes.
 # "stencil" language produces cleaner B/W output than "mask" language.
 MASK_PROMPT_FLASH = """Look at the input photo and find every tool/object on the paper.
+The reference paper/sheet is BACKGROUND, never a tool or part of a tool. Keep it pure white even if it looks blue, grey, tinted, shadowed, or partly covered by tools. Never output its rectangular outline as a black shape or merge it with a tool resting on it. Trace only the tool's own visible silhouette; exposed paper around and between tool parts must remain white.
+Include every visible part of each tool regardless of color, material, brightness, or reflections, including dark or shiny metal that blends into the background. For wire cutters and pliers, include the complete cutting jaws/head, pivot, metal shanks, and both handles, not just the colored grips. Preserve their exact photographed shape and open/closed position; do not replace them with a simplified generic icon. Keep genuine gaps between jaws and handles white.
 
 Now generate a completely new {width}x{height} pixel image that is:
 - A completely white (#FFFFFF) background
