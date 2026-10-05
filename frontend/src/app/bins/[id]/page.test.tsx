@@ -52,7 +52,7 @@ beforeEach(() => {
   localStorage.setItem('theme', 'dark')
   vi.mocked(updateBin).mockClear()
 })
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals() })
 
 it('keeps the chosen depth through adding tools, packing, recentering and too-tall overflow', async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
@@ -138,21 +138,27 @@ it('undoes and redoes the complete packed layout and width, then branches on a n
     id: 'label', text: 'Keep me', x: 8, y: 9, rotation: 15,
     font_size: 4, depth: 0.8, emboss: false,
   }
-  vi.mocked(getBin).mockResolvedValueOnce({
-    id: 'bin', name: 'Test bin', project_id: null, stl_path: null, created_at: null,
+  const before = {
+    name: 'Test bin',
     bin_config: { ...FACTORY_BIN_CONFIG, partial_bins: true, partial_bins_values: [true, false, true, true] },
     placed_tools: [tool, pinned], text_labels: [label],
+  }
+  vi.mocked(getBin).mockResolvedValueOnce({
+    ...structuredClone(before),
+    id: 'bin', project_id: null, stl_path: null, created_at: null,
   })
+  vi.useFakeTimers()
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
-  render(<QueryClientProvider client={client}><BinPage /></QueryClientProvider>)
-  const sizing = await screen.findByLabelText('Grid sizing')
-  // Autosave arms 100ms after mount; make the first edit after that boundary.
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 120)) })
+  await act(async () => {
+    render(<QueryClientProvider client={client}><BinPage /></QueryClientProvider>)
+  })
+  const sizing = screen.getByLabelText('Grid sizing')
+  await act(async () => { await vi.advanceTimersByTimeAsync(100) })
   fireEvent.change(sizing, { target: { value: 'fixed_depth' } })
   fireEvent.click(screen.getByText('Action history'))
   const width = screen.getByLabelText('Grid Width') as HTMLInputElement
-  await waitFor(() => expect(vi.mocked(updateBin).mock.calls.at(-1)?.[1].placed_tools).toEqual([tool, pinned]))
-  const before = structuredClone(vi.mocked(updateBin).mock.calls.at(-1)![1])
+  // Grid sizing is session-only; unchanged config/geometry does not schedule a save.
+  expect(updateBin).not.toHaveBeenCalled()
   const beforePath = screen.getByTestId('bin-canvas').querySelector('path')!.getAttribute('d')
 
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
@@ -163,9 +169,12 @@ it('undoes and redoes the complete packed layout and width, then branches on a n
       unfitted_tool_ids: [], unfitted_placement_ids: [], grid_x: 4,
     }),
   }))
-  fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
-  await waitFor(() => expect(width.value).toBe('4'))
-  await waitFor(() => expect(vi.mocked(updateBin).mock.calls.at(-1)?.[1].bin_config?.grid_x).toBe(4))
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-arrange' }))
+  })
+  expect(width.value).toBe('4')
+  await act(async () => { await vi.advanceTimersByTimeAsync(150) })
+  expect(vi.mocked(updateBin).mock.calls.at(-1)?.[1].bin_config?.grid_x).toBe(4)
   const packed = structuredClone(vi.mocked(updateBin).mock.calls.at(-1)![1])
   const packedPath = screen.getByTestId('bin-canvas').querySelector('path')!.getAttribute('d')
   expect(packed.placed_tools![0].rotation).toBe(90)
@@ -178,14 +187,16 @@ it('undoes and redoes the complete packed layout and width, then branches on a n
   await act(async () => {})
   expect(width.value).toBe('2')
   expect(screen.getByTestId('bin-canvas').querySelector('path')!.getAttribute('d')).toBe(beforePath)
-  await waitFor(() => expect(vi.mocked(updateBin).mock.calls.at(-1)?.[1]).toEqual(before))
+  await act(async () => { await vi.advanceTimersByTimeAsync(150) })
+  expect(vi.mocked(updateBin).mock.calls.at(-1)?.[1]).toEqual(before)
   expect(screen.getByRole('list', { name: 'Bin action history' }).textContent).toContain('Auto-arrange tools · Undone')
 
   fireEvent.click(screen.getByRole('button', { name: 'Redo' }))
   await act(async () => {})
   expect(width.value).toBe('4')
   expect(screen.getByTestId('bin-canvas').querySelector('path')!.getAttribute('d')).toBe(packedPath)
-  await waitFor(() => expect(vi.mocked(updateBin).mock.calls.at(-1)?.[1]).toEqual(packed))
+  await act(async () => { await vi.advanceTimersByTimeAsync(150) })
+  expect(vi.mocked(updateBin).mock.calls.at(-1)?.[1]).toEqual(packed)
 
   fireEvent.click(screen.getByRole('button', { name: 'Undo' }))
   fireEvent.change(screen.getByLabelText('Grid sizing'), { target: { value: 'fixed' } })
