@@ -21,6 +21,44 @@ grid and independently delete small faces: dense smoothed pockets exposed that
 cleanup as holes in an otherwise watertight solid. The same conversion serves
 STL, inserts, split parts, and 3MF bodies.
 
+## Access pockets
+
+Bin-local finger-access pockets (`access_pockets` on `BinConfig` /
+`GenerateRequest`) are built by `_make_access_pocket_cutters` and subtracted with
+the rest of the cutters. Each pocket opens at the wall top and is clipped to the
+bin interior (`_interior_clip_rect`), so outer walls, the stacking lip/collar and
+disabled partial-bin cells are never breached. Depth is clamped to the same
+protected-floor maximum as tool cutouts.
+
+- **Rectangle** (`_build_access_pocket`): a prism of the nominal `length`×`width`
+  at the pocket's `corner_radius`. An optional `bottom_radius` rolls the floor
+  into the walls with a matched curved fillet (a Minkowski sum of the inset
+  footprint with a sphere), covering both the floor-to-side and floor-to-end
+  transitions.
+- **Rounded scoop** (`_make_scoop_solid`): a capsule (cylinder plus two spheres)
+  cut lengthwise, kept to its lower half and scaled vertically to `depth`. The
+  result is a genuine curved-bottom trough with rounded ends whose `width` and
+  `depth` are independent, so a shallower profile is the same half-sausage
+  squashed vertically — not a rounded 2D polygon extrusion. `corner_radius` and
+  `bottom_radius` do not apply and must be zero.
+
+The **opening-edge finish** widens the rim outward and never shrinks the usable
+nominal opening. It is a Minkowski sum of the pocket's top cross-section with a
+cone (`chamfer`: 45°, equal vertical and horizontal distances) or a sphere
+(`fillet`: radius), so the opening widens by `edge_size` at the surface and
+returns to nominal one `edge_size` below it. `inherit` uses the bin's
+`cutout_chamfer` (clamped below the pocket depth); `sharp` is an explicit
+override that ignores it. Pockets union into the single cutter batch, so
+overlapping pockets and tool cavities leave no internal top rims. Pocket cutters
+are added whether or not any tool polygons are present, so a bin containing only
+access pockets still generates.
+
+With partial bins, the pocket clip region additionally removes every disabled
+cell and a `PARTIAL_BIN_RETAIN_WALL_PRESERVE_MM` (2.6 mm) margin around it
+before extruding, so a pocket footprint that crosses an enabled/disabled
+boundary or an outer retained strip cannot carve the retained partition, wall
+or stability material. Pockets only carve permitted enabled interiors.
+
 ## Generation concurrency
 
 STL generation has no concurrency limit by default. Set

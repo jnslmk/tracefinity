@@ -3,8 +3,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { FACTORY_BIN_CONFIG } from '@/lib/binDefaults'
-import { getBin, updateBin } from '@/lib/api'
-import type { PlacedTool, TextLabel } from '@/types'
+import { getBin, generateBinStl, updateBin } from '@/lib/api'
+import type { AccessPocket, PlacedTool, TextLabel } from '@/types'
 import BinPage from './page'
 
 const square = {
@@ -51,6 +51,7 @@ beforeEach(() => {
   localStorage.clear()
   localStorage.setItem('theme', 'dark')
   vi.mocked(updateBin).mockClear()
+  vi.mocked(generateBinStl).mockClear()
 })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals() })
 
@@ -251,5 +252,61 @@ it('keeps native text undo and discards a pending auto-arrange when history rest
   expect(screen.queryByText('Arranging tools…')).toBeNull()
   expect(screen.getByRole('list', { name: 'Bin action history' }).textContent).not.toContain('Auto-arrange tools')
   expect((screen.getByRole('button', { name: 'Redo' }) as HTMLButtonElement).disabled).toBe(false)
+  client.clear()
+})
+
+const pocketFixture: AccessPocket = {
+  id: 'p1', shape: 'rectangle', x: 21, y: 21, length: 30, width: 20, depth: 8,
+  rotation: 0, edge: 'inherit', edge_size: 1, corner_radius: 0, bottom_radius: 0,
+}
+
+// The autosave arms 100ms after mount; wait past that so the first edit schedules a save.
+async function waitForAutosaveArmed() {
+  const armed = Promise.withResolvers<void>()
+  setTimeout(armed.resolve, 250)
+  await act(async () => { await armed.promise })
+}
+
+it('loads, edits and saves access pockets as part of the bin config', async () => {
+  vi.mocked(getBin).mockResolvedValueOnce({
+    id: 'bin', name: 'Pocket bin', project_id: null,
+    bin_config: { ...FACTORY_BIN_CONFIG, access_pockets: [pocketFixture] },
+    placed_tools: [{
+      id: 'placement', tool_id: square.id, name: square.name, rotation: 0,
+      points: square.points, finger_holes: [], interior_rings: [],
+    }],
+    text_labels: [], stl_path: null, created_at: null,
+  })
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+  render(<QueryClientProvider client={client}><BinPage /></QueryClientProvider>)
+
+  fireEvent.mouseDown(await screen.findByTestId('access-pocket-p1'))
+  fireEvent.mouseUp(window)
+  expect(screen.getByLabelText('Access pocket settings')).toBeTruthy()
+  await waitForAutosaveArmed()
+  fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+
+  await waitFor(() => expect(vi.mocked(updateBin).mock.calls.at(-1)?.[1].bin_config?.access_pockets).toEqual([]))
+  client.clear()
+})
+
+it('generates a pocket-only bin and clears the preview when the last pocket is removed', async () => {
+  vi.mocked(getBin).mockResolvedValueOnce({
+    id: 'bin', name: 'Pocket bin', project_id: null,
+    bin_config: { ...FACTORY_BIN_CONFIG, access_pockets: [pocketFixture] },
+    placed_tools: [], text_labels: [], stl_path: null, created_at: null,
+  })
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+  render(<QueryClientProvider client={client}><BinPage /></QueryClientProvider>)
+
+  fireEvent.mouseDown(await screen.findByTestId('access-pocket-p1'))
+  fireEvent.mouseUp(window)
+  await waitFor(() => expect(vi.mocked(generateBinStl)).toHaveBeenCalled(), { timeout: 3000 })
+
+  fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+  await waitFor(
+    () => expect(screen.getByText('Add tools or access pockets to see preview')).toBeTruthy(),
+    { timeout: 3000 },
+  )
   client.clear()
 })

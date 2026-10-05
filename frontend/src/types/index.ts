@@ -26,6 +26,32 @@ export interface FingerHole {
 
 export type CutoutShape = 'circle' | 'cylinder' | 'square' | 'rectangle' | 'filleted_rectangle'
 
+export type AccessPocketShape = 'rectangle' | 'scoop'
+export type AccessPocketEdge = 'inherit' | 'sharp' | 'chamfer' | 'fillet'
+
+/**
+ * A bin-local finger-access pocket cut into the bin's usable interior.
+ * `length`/`width` are the nominal opening dimensions before the opening-edge
+ * finish widens the rim; `depth` is the vertical cut below the surface. A
+ * `scoop` is a genuine rounded 3D trough (curved bottom, rounded ends) whose
+ * width and depth are independent, so `corner_radius`/`bottom_radius` do not
+ * apply to it.
+ */
+export interface AccessPocket {
+  id: string
+  shape: AccessPocketShape
+  x: number
+  y: number
+  length: number
+  width: number
+  depth: number
+  rotation: number
+  edge: AccessPocketEdge
+  edge_size: number
+  corner_radius: number
+  bottom_radius: number
+}
+
 export interface Polygon {
   id: string
   points: Point[]
@@ -154,6 +180,7 @@ export interface BinDefaults {
 
 export interface BinConfig extends BinDefaults {
   text_labels: TextLabel[]
+  access_pockets: AccessPocket[]
 }
 
 // --- tool library ---

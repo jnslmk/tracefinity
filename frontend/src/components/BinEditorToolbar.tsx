@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { MousePointer2, Trash2, Magnet, Type, Pencil, Maximize2, Pin, PinOff } from 'lucide-react'
+import { MousePointer2, Trash2, Magnet, Type, Pencil, Maximize2, Pin, PinOff, Pocket } from 'lucide-react'
 import type { FingerHole, PlacedTool, TextLabel } from '@/types'
 import { SNAP_GRID_MIN, SNAP_GRID_MAX } from '@/lib/constants'
 import { cutoutShapeLabel, isRectangularCutout } from '@/lib/cutouts'
@@ -73,7 +73,7 @@ function DepthInput({ value, defaultDepth, maxDepth, onCommit, resetKey }: Depth
   )
 }
 
-type Tool = 'select' | 'text'
+type Tool = 'select' | 'text' | 'pocket'
 
 interface Props {
   activeTool: Tool
@@ -151,6 +151,14 @@ export function BinEditorToolbar({
       >
         <Type className="w-3.5 h-3.5" />
         Text
+      </button>
+      <button
+        onClick={() => setActiveTool('pocket')}
+        className={`${tbBtn} ${activeTool === 'pocket' ? tbActive : tbInactive}`}
+        title="Place a finger-access pocket"
+      >
+        <Pocket className="w-3.5 h-3.5" />
+        Pocket
       </button>
 
       <div className="w-px h-4 bg-glass-border mx-1 flex-shrink-0" />

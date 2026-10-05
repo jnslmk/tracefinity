@@ -75,6 +75,18 @@ Reference for AI agents. Check here before suggesting new features or claiming s
 - Auto-centre tools in expanded grids
 - Centre view (fit all to viewport)
 
+## Access pockets (bin-local)
+
+- Finger-access recesses cut into the bin itself, independent of the tool library
+- Rectangle: rounded-rectangle recess with an optional plan-view corner radius and an optional curved bottom radius (floor-to-wall fillet)
+- Rounded scoop: a genuine curved-bottom trough with rounded ends (a half-sausage), with independent width and depth so it can be shallow
+- Opening-edge finish: inherit the bin cutout chamfer, sharp, 45° chamfer, or round (fillet); chamfer and fillet are mutually exclusive
+- Length/width are the nominal opening before finishing; finishing widens the rim outward rather than shrinking usable space, and both the nominal outline and the finishing envelope are shown in 2D
+- Place with the Pocket tool, then select, drag, resize from a corner, rotate, duplicate and delete; exact length/width/depth/angle fields
+- Depth is clamped to the same protected floor as tool cutouts and the editor shows the effective depth and effective opening edge
+- Bin-local positioning: pockets never move during auto-arrange, recentring, height planning or library sync
+- A bin containing only access pockets can still preview and export
+
 ## Export
 
 - STL download (single or multi-part)

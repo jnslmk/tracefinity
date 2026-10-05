@@ -194,6 +194,26 @@ It is finite and strictly positive, or `null` for unknown. A tool update that om
 the field preserves it; explicit `null` clears it. Tool detail and summary responses
 include it. Old tools and newly saved traces default to unknown, never zero.
 
+`bin_config.access_pockets` is a list of bin-local finger-access pockets, each
+`{id, shape, x, y, length, width, depth, rotation, edge, edge_size,
+corner_radius, bottom_radius}`. `shape` is `"rectangle"` or `"scoop"`;
+`length`/`width` are the nominal opening in millimetres *before* the opening-edge
+finish and `x`/`y`/`rotation` place the pocket in bin space (origin top-left,
+clockwise angles, Y-down). `edge` is `"inherit"` (follow the bin cutout
+chamfer), `"sharp"` (explicit override), `"chamfer"` (45°, equal vertical and
+horizontal distances) or `"fillet"` (round); `edge_size` is the chamfer leg or
+fillet radius. A `"scoop"` is a genuine curved-bottom trough with intrinsic
+curvature, so `corner_radius` and `bottom_radius` must be `0` (`422` otherwise);
+a `"rectangle"` may use both radii. Non-finite or non-positive sizes, a corner
+radius above half the smaller opening, a bottom radius above the depth or half
+the smaller opening, and an explicit edge size at or above the depth are `422`.
+Pockets persist with the rest of `bin_config` through `PUT /api/bins/{id}` and
+are returned by bin reads; records written before pockets existed load with an
+empty list. Where the pocket depth exceeds the protected-floor maximum the
+generator clamps it (as it does for tool cutouts); clients should surface the
+effective depth. `POST /api/bins/{id}/generate` accepts a bin with no placed
+tools when it has at least one access pocket (`400` otherwise).
+
 Bin detail includes a derived `height_assessment`. Height planning returns
 `{assessment, alternatives}`. Each alternative identifies its strategy, whether
 measurements are complete, proposed `bin_config` and `placed_tools`, any explicit

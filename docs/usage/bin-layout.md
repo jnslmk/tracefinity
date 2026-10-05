@@ -44,10 +44,12 @@ Use **Undo** and **Redo** in the sidebar, or **Ctrl/Cmd+Z** and
 recorded actions, the current state, and any undone actions.
 
 History includes adding and removing tools, moving and rotating placements,
-pinning, cutout-depth changes, text labels, bin configuration, grid-sizing mode,
-height plans and renaming. A drag is one action. Auto-arrange and its automatic
-grid changes are one action too: undo restores the previous dimensions, partial
-cell mask, tool outlines, rotations, finger holes and labels together.
+pinning, cutout-depth changes, text labels, access-pocket placement, dragging,
+resizing, rotating, duplicating and deleting, bin configuration, grid-sizing
+mode, height plans and renaming. A drag is one action. Auto-arrange and its
+automatic grid changes are one action too: undo restores the previous
+dimensions, partial cell mask, tool outlines, rotations, finger holes and labels
+together.
 
 Restored changes are automatically saved and refresh the preview. A new edit
 after undo discards the redo branch. Undo also discards an in-flight auto-arrange,
@@ -100,6 +102,48 @@ pending result, so a late response cannot replace the updated placement.
 ## Per-tool cutout depth
 
 Select a tool to see a **Depth** field in the toolbar. Leave it blank to use the bin's default cutout depth. Enter a value to override it for that tool only. Click the reset button to clear the override.
+
+## Access pockets
+
+Access pockets are finger recesses cut into the bin itself, so a tool can be
+lifted out of a tight cavity. Unlike finger holes they are not part of a tool:
+they belong to the bin, are stored in its `bin_config`, and never move when
+tools are auto-arranged, recentred or re-synced from the library.
+
+1. Click the **Pocket** tool in the floating toolbar.
+2. Click inside the bin to place a pocket. It is selected, and the **Access
+   pocket** panel opens.
+
+The panel edits the selected pocket:
+
+- **Rectangle / Rounded scoop** shape toggle. A rounded scoop is a genuine
+  curved-bottom trough with rounded ends; its width and depth are independent,
+  so it can be shallower than a half-sausage. A rectangle keeps the corner and
+  bottom radii below; a scoop has intrinsic curvature and hides them.
+- **Length (mm)**, **Width (mm)**, **Depth (mm)**, **Angle (°)** exact values.
+  Length and width are the nominal opening *before* the opening-edge finish.
+- **Opening edge**: **Inherit bin chamfer** (follows **Cutout Chamfer**),
+  **Sharp** (an explicit override that ignores later bin-default changes),
+  **45° chamfer**, or **Round (fillet)**. Chamfer and fillet are mutually
+  exclusive; the extra field sets the chamfer's leg length or the fillet's
+  radius.
+- **Geometry** (rectangles only): **Corner radius** (plan-view) and **Bottom
+  radius** (the curved floor-to-wall and floor-to-end transition).
+- **Duplicate** and **Delete**.
+
+Finishing widens the opening outward, so it never shrinks the usable space. The
+canvas draws the nominal opening as a solid outline and the finishing envelope
+as a dashed outline. **Depth** cannot exceed the same protected floor as tool
+cutouts. Typing a value outside a field's allowed range adjusts it to the limit
+and shows a short explanation under the field naming the requested and effective
+values (and the protected-floor maximum for depth); the panel also always shows
+the effective depth and effective opening edge, so nothing is changed silently.
+
+On the canvas, drag a pocket to move it, drag a corner handle to resize it from
+the opposite corner, and drag the round handle to rotate it. A resize cannot
+collapse a pocket below 1mm; impossible radii are clamped to the opening.
+
+A bin may contain only access pockets: preview and export still work.
 
 ## Text labels
 

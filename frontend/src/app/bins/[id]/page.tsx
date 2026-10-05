@@ -11,7 +11,7 @@ import { ProjectSpaceUsage } from '@/components/ProjectSpaceUsage'
 import { getBin, updateBin, generateBinStl, getBinStlUrl, getBinZipUrl, getBinThreemfUrl, getBinInsertUrl, getImageUrl, listTools, updateTool } from '@/lib/api'
 import { buildBinConfig, createPartialBinsValues, getDefaultBinConfig, resetDefaultBinConfig, saveDefaultBinConfig } from '@/lib/binDefaults'
 import { downloadExport } from '@/lib/download'
-import type { BinConfig, BinData, HeightProposal, PlacedTool, TextLabel } from '@/types'
+import type { AccessPocket, BinConfig, BinData, HeightProposal, PlacedTool, TextLabel } from '@/types'
 import { Download, Loader2, Package, ChevronDown, Check, TriangleAlert } from 'lucide-react'
 import { Breadcrumb } from '@/components/Breadcrumb'
 import { Alert } from '@/components/Alert'
@@ -250,7 +250,22 @@ export default function BinPage() {
   const doGenerate = useCallback(async () => {
     // uploaded bins are never regenerated: the stored mesh is served back as-is
     if (binData?.imported_model) return
-    if (placedTools.length === 0 || gridLimitError) return
+    if (gridLimitError) return
+    if (placedTools.length === 0 && config.access_pockets.length === 0) {
+      // nothing left to generate: drop any preview of a removed pocket
+      abortRef.current?.abort()
+      abortRef.current = null
+      generatingRef.current = false
+      lastGenerateRef.current = ''
+      setGenerating(false)
+      setStlUrl(null)
+      setStlUrls([])
+      setThreemfUrl(null)
+      setZipUrl(null)
+      setInsertStlUrl(null)
+      setWarning(null)
+      return
+    }
 
     const key = JSON.stringify({ placedTools, config, textLabels, smoothed: [...smoothedToolIds], levels: [...smoothLevels] })
     if (key === lastGenerateRef.current) return
@@ -352,6 +367,11 @@ export default function BinPage() {
   const handlePlacedToolsChange = useCallback((updated: PlacedTool[], label = 'Edit tools') => {
     markAction(label)
     setPlacedTools(updated)
+  }, [markAction])
+
+  const handleAccessPocketsChange = useCallback((updated: AccessPocket[], label = 'Edit pockets') => {
+    markAction(label)
+    setConfig(prev => ({ ...prev, access_pockets: updated }))
   }, [markAction])
 
   const handleAutoArrange = useCallback((updated: PlacedTool[], computedWidth: number | null) => {
@@ -739,6 +759,9 @@ export default function BinPage() {
                 onPlacedToolsChange={handlePlacedToolsChange}
                 textLabels={textLabels}
                 onTextLabelsChange={(value, label = 'Edit labels') => { markAction(label, false); setTextLabels(value) }}
+                accessPockets={config.access_pockets}
+                onAccessPocketsChange={handleAccessPocketsChange}
+                binChamfer={config.cutout_chamfer}
                 gridX={config.grid_x}
                 gridY={config.grid_y}
                 partialBins={config.partial_bins}
@@ -768,6 +791,9 @@ export default function BinPage() {
                 <span>{config.grid_x}x{config.grid_y} Grid ({binW} x {binH} mm)</span>
                 {placedTools.length > 0 && (
                   <span>· {placedTools.length} tool{placedTools.length !== 1 ? 's' : ''} placed</span>
+                )}
+                {config.access_pockets.length > 0 && (
+                  <span>· {config.access_pockets.length} access pocket{config.access_pockets.length !== 1 ? 's' : ''}</span>
                 )}
               </div>
             </div>
@@ -803,8 +829,8 @@ export default function BinPage() {
                     </>
                   ) : gridLimitError ? (
                     <span className="max-w-xs px-4 text-center">Layout does not fit the usable grid. Your edits are still saved.</span>
-                  ) : placedTools.length === 0 ? (
-                    <span>Add tools to see preview</span>
+                  ) : placedTools.length === 0 && config.access_pockets.length === 0 ? (
+                    <span>Add tools or access pockets to see preview</span>
                   ) : (
                     <span>Preview will appear here</span>
                   )}

@@ -2603,8 +2603,8 @@ def generate_bin_stl(request: Request, bin_id: str, user_id: str = Depends(get_u
         return GenerateResponse(stl_url=url, stl_urls=[url])
     bin_data = bin_data.model_copy(deep=True)
     sync_placed_tools(bin_data, user_tools)
-    if not bin_data.placed_tools:
-        raise HTTPException(status_code=400, detail="bin has no tools placed")
+    if not bin_data.placed_tools and not bin_data.bin_config.access_pockets:
+        raise HTTPException(status_code=400, detail="bin has no tools or access pockets")
 
     bc = bin_data.bin_config
 
@@ -2650,6 +2650,7 @@ def generate_bin_stl(request: Request, bin_id: str, user_id: str = Depends(get_u
         text_labels=bc.text_labels + bin_data.text_labels,
         bed_size=bc.bed_size,
         half_grid_base=bc.half_grid_base,
+        access_pockets=bc.access_pockets,
     )
 
     response = _run_generate(scaled, gen_req, bin_id, up, input_hash, user_id, user_bins)

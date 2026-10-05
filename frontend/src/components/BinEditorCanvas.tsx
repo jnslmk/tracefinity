@@ -1,18 +1,20 @@
 'use client'
 
 import { RefObject } from 'react'
-import type { PlacedTool, TextLabel } from '@/types'
+import type { AccessPocket, PlacedTool, TextLabel } from '@/types'
 import { polygonPathData } from '@/lib/svg'
 import { GRID_UNIT, DISPLAY_SCALE } from '@/lib/constants'
 import { CutoutOverlay } from '@/components/CutoutOverlay'
+import { AccessPocketOverlay } from '@/components/AccessPocketOverlay'
 import { useOutlinePreview } from '@/hooks/useOutlinePreview'
 
-type Tool = 'select' | 'text'
+type Tool = 'select' | 'text' | 'pocket'
 
 type Selection =
   | { type: 'tool'; toolId: string }
   | { type: 'hole'; toolId: string; holeId: string }
   | { type: 'label'; labelId: string }
+  | { type: 'pocket'; pocketId: string }
   | null
 
 interface Props {
@@ -38,6 +40,13 @@ interface Props {
   binHeightMm: number
   defaultCutoutDepth: number
   halfGridBase?: boolean
+  accessPockets: AccessPocket[]
+  binChamfer: number
+  pocketMaxDepth: number
+  onPocketMouseDown: (id: string) => (e: React.MouseEvent) => void
+  onPocketRotateMouseDown: (id: string) => (e: React.MouseEvent) => void
+  onPocketResizeMouseDown: (id: string, corner: number) => (e: React.MouseEvent) => void
+  onPocketClick: (id: string, e: React.MouseEvent) => void
   // handle sizing
   handleR: number
   handleStroke: number
@@ -86,6 +95,13 @@ export function BinEditorCanvas({
   binHeightMm,
   defaultCutoutDepth,
   halfGridBase,
+  accessPockets,
+  binChamfer,
+  pocketMaxDepth,
+  onPocketMouseDown,
+  onPocketRotateMouseDown,
+  onPocketResizeMouseDown,
+  onPocketClick,
   handleR,
   handleStroke,
   handleOffset,
@@ -214,6 +230,21 @@ export function BinEditorCanvas({
               </g>
             )
           })}
+          <AccessPocketOverlay
+            pockets={accessPockets}
+            selectedId={selection?.type === 'pocket' ? selection.pocketId : undefined}
+            binChamfer={binChamfer}
+            maxDepth={pocketMaxDepth}
+            interactive={activeTool === 'select'}
+            handleR={handleR}
+            handleStroke={handleStroke}
+            onPocketMouseDown={onPocketMouseDown}
+            onPocketRotateMouseDown={onPocketRotateMouseDown}
+            onPocketResizeMouseDown={onPocketResizeMouseDown}
+            onPocketClick={onPocketClick}
+            stopClick={stopClick}
+          />
+
           {/* Grid stays above tool fills; screen-space strokes remain visible when zoomed out. */}
           {Array.from({ length: Math.floor(gridX * 2) + 1 }).map((_, i) => {
             const pos = i * 0.5

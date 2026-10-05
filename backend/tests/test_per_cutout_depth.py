@@ -1,4 +1,6 @@
 """Tests for per-cutout depth override in stl_generator_manifold."""
+import pytest
+
 from app.models.schemas import BinParams
 from app.services.stl_generator_manifold import _resolve_pocket_depth
 
@@ -39,3 +41,21 @@ class TestResolvePocketDepth:
     def test_zero_override_is_clamped_to_min(self):
         bp = BinParams(cutout_depth=20)
         assert _resolve_pocket_depth(0, bp, max_depth=100) == 5.0
+
+
+class TestAccessPocketDepth:
+    def test_pocket_depth_uses_the_same_protected_floor_max(self):
+        from app.models.schemas import AccessPocket
+        from app.services.stl_generator_manifold import _make_access_pocket_cutters
+
+        config = BinParams(grid_x=2, grid_y=2, height_units=4)
+        wall_top = 4 * 7
+        max_depth = wall_top - 4.75 - 2
+        pocket = AccessPocket(id="p", x=42, y=42, length=10, width=10, depth=999)
+        cutters = _make_access_pocket_cutters(
+            [pocket], config, wall_top_z=wall_top, max_depth=max_depth,
+            offset_x=-42.0, offset_y=-42.0,
+        )
+        assert cutters is not None
+        # the cutter bottoms out at the protected floor, never below it
+        assert cutters.bounding_box()[2] == pytest.approx(wall_top - max_depth, abs=0.05)

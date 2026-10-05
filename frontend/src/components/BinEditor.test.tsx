@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useState } from 'react'
-import type { PlacedTool } from '@/types'
+import type { AccessPocket, PlacedTool } from '@/types'
 import { BinEditor } from './BinEditor'
 import { SNAP_GRID } from '@/lib/constants'
 import type { GridSizingMode } from '@/lib/constants'
@@ -12,6 +12,8 @@ const baseProps = {
   onPlacedToolsChange: () => {},
   textLabels: [],
   onTextLabelsChange: () => {},
+  accessPockets: [],
+  onAccessPocketsChange: () => {},
   gridX: 2,
   gridY: 2,
   partialBins: false,
@@ -478,5 +480,139 @@ describe('BinEditor auto-arrange feedback', () => {
     expect(onArrange).not.toHaveBeenCalled()
     expect(screen.queryByRole('status')).toBeNull()
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
+const pocket = (over: Partial<AccessPocket> = {}): AccessPocket => ({
+  id: 'p1', shape: 'rectangle', x: 21, y: 21, length: 30, width: 20, depth: 8,
+  rotation: 0, edge: 'inherit', edge_size: 1, corner_radius: 0, bottom_radius: 0,
+  ...over,
+})
+
+function PocketEditor({ initial = [] as AccessPocket[], onChange = () => {} }: {
+  initial?: AccessPocket[]
+  onChange?: (pockets: AccessPocket[]) => void
+}) {
+  const [pockets, setPockets] = useState(initial)
+  return (
+    <BinEditor
+      {...baseProps}
+      accessPockets={pockets}
+      onAccessPocketsChange={next => { onChange(next); setPockets(next) }}
+    />
+  )
+}
+
+function frameController() {
+  let frame!: FrameRequestCallback
+  vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => { frame = callback; return 1 }))
+  vi.stubGlobal('cancelAnimationFrame', vi.fn())
+  return () => act(() => frame(0))
+}
+
+describe('BinEditor access pockets', () => {
+  afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+
+  it('places a pocket at the clicked position when the pocket tool is active', () => {
+    const onChange = vi.fn()
+    render(<PocketEditor onChange={onChange} />)
+    const svg = screen.getByTestId('bin-canvas')
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 742, height: 702 } as DOMRect)
+    fireEvent.click(screen.getByRole('button', { name: 'Pocket' }))
+    fireEvent.click(svg, { clientX: 10 + 21 * 8, clientY: 10 + 21 * 8 })
+    expect(onChange).toHaveBeenCalled()
+    const added = onChange.mock.calls.at(-1)![0] as AccessPocket[]
+    expect(added).toHaveLength(1)
+    expect(added[0]).toMatchObject({ shape: 'rectangle', x: 21, y: 21, edge: 'inherit', corner_radius: 0, bottom_radius: 0 })
+    // the new pocket is selected, so its controls are visible
+    expect(screen.getByLabelText('Access pocket settings')).toBeTruthy()
+  })
+
+  it('selects a pocket and edits it through the controls', () => {
+    const onChange = vi.fn()
+    render(<PocketEditor initial={[pocket()]} onChange={onChange} />)
+    fireEvent.mouseDown(screen.getByTestId('access-pocket-p1'))
+    fireEvent.mouseUp(window)
+    const length = screen.getByLabelText('Length (mm)')
+    fireEvent.change(length, { target: { value: '40' } })
+    fireEvent.blur(length)
+    expect(onChange.mock.calls.at(-1)![0][0].length).toBe(40)
+  })
+
+  it('moves a pocket with the mouse', () => {
+    const advanceFrame = frameController()
+    const onChange = vi.fn()
+    render(<PocketEditor initial={[pocket({ x: 21, y: 21 })]} onChange={onChange} />)
+    const svg = screen.getByTestId('bin-canvas')
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 742, height: 702 } as DOMRect)
+    fireEvent.mouseDown(screen.getByTestId('access-pocket-p1'), { clientX: 10 + 21 * 8, clientY: 10 + 21 * 8 })
+    fireEvent.mouseMove(window, { clientX: 10 + 31 * 8, clientY: 10 + 21 * 8 })
+    advanceFrame()
+    fireEvent.mouseUp(window)
+    expect(onChange.mock.calls.at(-1)![0][0]).toMatchObject({ x: 31, y: 21 })
+  })
+
+  it('resizes a pocket from a corner handle with the opposite corner fixed', () => {
+    const advanceFrame = frameController()
+    const onChange = vi.fn()
+    render(<PocketEditor initial={[pocket()]} onChange={onChange} />)
+    const svg = screen.getByTestId('bin-canvas')
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 742, height: 702 } as DOMRect)
+    fireEvent.mouseDown(screen.getByTestId('access-pocket-p1'))
+    fireEvent.mouseUp(window)
+    const handle = screen.getByTestId('access-pocket-resize-p1-2')
+    fireEvent.mouseDown(handle, { clientX: 10 + 36 * 8, clientY: 10 + 31 * 8 })
+    fireEvent.mouseMove(window, { clientX: 10 + 46 * 8, clientY: 10 + 36 * 8 })
+    advanceFrame()
+    fireEvent.mouseUp(window)
+    const resized = onChange.mock.calls.at(-1)![0][0] as AccessPocket
+    expect(resized.length).toBeCloseTo(40)
+    expect(resized.width).toBeCloseTo(25)
+  })
+
+  it('rotates a pocket about its centre', () => {
+    const advanceFrame = frameController()
+    const onChange = vi.fn()
+    render(<PocketEditor initial={[pocket({ x: 42, y: 42 })]} onChange={onChange} />)
+    const svg = screen.getByTestId('bin-canvas')
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 742, height: 702 } as DOMRect)
+    fireEvent.mouseDown(screen.getByTestId('access-pocket-p1'))
+    fireEvent.mouseUp(window)
+    fireEvent.mouseDown(screen.getByTestId('access-pocket-rotate-p1'), { clientX: 10 + 52 * 8, clientY: 10 + 42 * 8 })
+    fireEvent.mouseMove(window, { clientX: 10 + 42 * 8, clientY: 10 + 52 * 8 })
+    advanceFrame()
+    fireEvent.mouseUp(window)
+    expect(onChange.mock.calls.at(-1)![0][0].rotation).toBeCloseTo(90)
+  })
+
+  it('persists an edited shallow scoop depth through the duplicate and shape-switch flow', () => {
+    const onChange = vi.fn()
+    render(<PocketEditor initial={[pocket({ depth: 12, corner_radius: 3, bottom_radius: 4, rotation: 20 })]} onChange={onChange} />)
+    const commit = (label: string, value: string) => {
+      const input = screen.getByLabelText(label)
+      fireEvent.change(input, { target: { value } })
+      fireEvent.blur(input)
+    }
+    fireEvent.mouseDown(screen.getByTestId('access-pocket-p1'))
+    fireEvent.mouseUp(window)
+    fireEvent.click(screen.getByRole('button', { name: 'Duplicate' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Rounded scoop' }))
+    commit('Length (mm)', '42')
+    commit('Depth (mm)', '8')
+    const pockets = onChange.mock.calls.at(-1)![0] as AccessPocket[]
+    const scoop = pockets.find(value => value.shape === 'scoop')!
+    expect(scoop.depth).toBe(8)
+    expect(scoop.length).toBe(42)
+  })
+
+  it('duplicates and deletes the selected pocket', () => {
+    const onChange = vi.fn()
+    render(<PocketEditor initial={[pocket()]} onChange={onChange} />)
+    fireEvent.mouseDown(screen.getByTestId('access-pocket-p1'))
+    fireEvent.mouseUp(window)
+    fireEvent.click(screen.getByRole('button', { name: 'Duplicate' }))
+    expect(onChange.mock.calls.at(-1)![0]).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    expect(onChange.mock.calls.at(-1)![0]).toHaveLength(1)
   })
 })

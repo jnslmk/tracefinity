@@ -263,6 +263,7 @@ def test_imported_bin_is_read_only_but_can_be_renamed_and_linked(tmp_path, monke
     assert client.put(f"/api/bins/{body['id']}", json={"bin_config": {"grid_x": 4}}).status_code == 400
     assert client.put(f"/api/bins/{body['id']}", json={"placed_tools": []}).status_code == 400
     assert client.put(f"/api/bins/{body['id']}", json={"text_labels": [{"id": "t1", "text": "x", "x": 0, "y": 0}]}).status_code == 400
+    assert client.put(f"/api/bins/{body['id']}", json={"bin_config": {"access_pockets": [{"id": "p", "x": 0, "y": 0}]}}).status_code == 400
 
     renamed = client.put(f"/api/bins/{body['id']}", json={"name": "Renamed"})
     assert renamed.status_code == 200

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 from app.constants import GF_GRID
 
 # Bump when geometry changes so saved previews and exports regenerate.
-STL_GEOMETRY_VERSION = 5
+STL_GEOMETRY_VERSION = 6
 
 GF_HALF_GRID = GF_GRID / 2  # 21mm
 GF_HEIGHT_UNIT = 7.0
@@ -901,6 +901,190 @@ def _interior_clip_rect(config):
     return _SPoly([(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)])
 
 
+# ── access pockets ────────────────────────────────────────────────────────────
+
+ACCESS_POCKET_SEGS = 32
+ACCESS_POCKET_SLAB_MM = 0.01
+
+
+def _access_pocket_rect_cs(length: float, width: float, radius: float):
+    """Plan cross-section for a rectangular pocket, rounded or sharp corners."""
+    if radius <= 1e-9:
+        return _cs(_sharp_rect_pts(length, width))
+    return _cs(_rounded_rect_pts(length, width, radius, ACCESS_POCKET_SEGS))
+
+
+def _scoop_top_cs(length: float, width: float):
+    """Plan cross-section of a scoop at its opening: a stadium, or an ellipse."""
+    if length >= width - 1e-9:
+        return _cs(_rounded_rect_pts(length, width, width / 2.0, ACCESS_POCKET_SEGS))
+    n = max(8, ACCESS_POCKET_SEGS)
+    pts = np.array([
+        (0.5 * length * math.cos(2 * math.pi * i / n),
+         0.5 * width * math.sin(2 * math.pi * i / n))
+        for i in range(n)
+    ], dtype=np.float64)
+    return _cs(pts)
+
+
+def _make_scoop_solid(length: float, width: float, depth: float):
+    """Half-sausage trough: a capsule cut lengthwise, scaled to width and depth.
+
+    Built with the opening at z=0 and the curved floor at z=-depth. The
+    capsule is squashed vertically to the requested depth, so width and depth
+    stay independent while the bottom and ends stay curved (a genuine 3D
+    scoop, not a rounded 2D polygon extrusion).
+    """
+    import manifold3d as mf
+
+    radius = width / 2.0
+    straight = max(0.0, length - width)
+    scale_x = length / (straight + 2 * radius)
+    sphere = mf.Manifold.sphere(radius, circular_segments=ACCESS_POCKET_SEGS)
+    if straight > 1e-6:
+        capsule = (
+            mf.Manifold.cylinder(straight, radius, circular_segments=ACCESS_POCKET_SEGS, center=True)
+            .rotate((0.0, 90.0, 0.0))
+            + sphere.translate((straight / 2.0, 0.0, 0.0))
+            + sphere.translate((-straight / 2.0, 0.0, 0.0))
+        )
+    else:
+        capsule = sphere
+    capsule = capsule.scale((scale_x, 1.0, 1.0))
+    half = capsule.trim_by_plane((0.0, 0.0, -1.0), 0.0)  # keep the lower half
+    return half.scale((1.0, 1.0, depth / radius))
+
+
+def _resolve_access_pocket_edge(pocket, bin_chamfer: float, depth: float):
+    """Resolve the opening-edge finish to (kind, size), or None for a sharp edge."""
+    if pocket.edge == "sharp":
+        return None
+    if pocket.edge == "inherit":
+        if bin_chamfer <= 0:
+            return None
+        size = min(bin_chamfer, max(0.0, depth - 1.0))
+        return ("chamfer", size) if size > 1e-9 else None
+    size = min(pocket.edge_size, max(0.0, depth - 0.01))
+    return (pocket.edge, size) if size > 1e-9 else None
+
+
+def _build_access_pocket(pocket, depth: float, edge):
+    """Local pocket cutter: opening at z=0, floor at z=-depth, centred at origin.
+
+    The opening-edge finish widens the rim outward (via a Minkowski sum with a
+    sphere for a fillet or a 45° cone for a chamfer) instead of eating into the
+    nominal opening, and the rectangular bottom radius rolls the floor into the
+    walls with a matched curved profile.
+    """
+    import manifold3d as mf
+
+    if pocket.shape == "scoop":
+        parts = [_make_scoop_solid(pocket.length, pocket.width, depth)]
+        top_cs = _scoop_top_cs(pocket.length, pocket.width)
+    else:
+        cs = _access_pocket_rect_cs(pocket.length, pocket.width, pocket.corner_radius)
+        top_cs = cs
+        start = min(pocket.bottom_radius, max(0.0, depth - 1e-3))
+        parts = [
+            mf.Manifold.extrude(cs, depth - start + ACCESS_POCKET_SLAB_MM).translate(
+                (0.0, 0.0, -depth + start - ACCESS_POCKET_SLAB_MM)
+            )
+        ]
+        if start > 1e-9:
+            inset = cs.offset(-start, mf.JoinType.Round)
+            if not inset.is_empty() and inset.area() > 0:
+                slab = mf.Manifold.extrude(inset, ACCESS_POCKET_SLAB_MM).translate(
+                    (0.0, 0.0, -depth + start - ACCESS_POCKET_SLAB_MM / 2)
+                )
+                parts.append(slab.minkowski_sum(
+                    mf.Manifold.sphere(start, circular_segments=ACCESS_POCKET_SEGS)
+                ))
+
+    if edge is not None:
+        kind, size = edge
+        slab = mf.Manifold.extrude(top_cs, ACCESS_POCKET_SLAB_MM).translate(
+            (0.0, 0.0, -ACCESS_POCKET_SLAB_MM / 2)
+        )
+        if kind == "chamfer":
+            tool = mf.Manifold.cylinder(
+                size, 0.0, size, circular_segments=ACCESS_POCKET_SEGS
+            ).translate((0.0, 0.0, -size))
+        else:
+            tool = mf.Manifold.sphere(size, circular_segments=ACCESS_POCKET_SEGS)
+        parts.append(slab.minkowski_sum(tool))
+
+    if len(parts) == 1:
+        return parts[0]
+    return mf.Manifold.batch_boolean(parts, mf.OpType.Add)
+
+
+def _make_access_pocket_cutters(
+    pockets,
+    config,
+    wall_top_z: float,
+    max_depth: float,
+    offset_x: float,
+    offset_y: float,
+):
+    """Batch union of bin-local access-pocket cutters.
+
+    Each pocket opens at the bin surface and is clipped to the bin interior so
+    outer walls, the stacking lip and disabled partial-bin cells stay intact.
+    Depth is clamped to the same protected-floor maximum as tool cutouts.
+    """
+    import manifold3d as mf
+
+    interior = _interior_clip_rect(config)
+    interior_cs = mf.CrossSection([list(interior.exterior.coords)[:-1]], mf.FillRule.Positive)
+
+    # Partial bins retain material around and across disabled cells. Clip the
+    # pocket cutter out of every disabled cell and its preserved wall strip, so
+    # the whole cutter footprint can only carve permitted enabled interiors.
+    if _uses_partial_shell(config):
+        margin = PARTIAL_BIN_RETAIN_WALL_PRESERVE_MM
+        protected = []
+        grid_x, grid_y = _grid_cell_counts(config)
+        for iy in range(grid_y):
+            for ix in range(grid_x):
+                if _cell_enabled(config, ix, iy):
+                    continue
+                cx, cy = _cell_center(ix, iy, config.grid_x, config.grid_y)
+                half = GF_GRID / 2.0 + margin
+                protected.append(mf.CrossSection([[
+                    (cx - half, cy - half), (cx + half, cy - half),
+                    (cx + half, cy + half), (cx - half, cy + half),
+                ]]))
+        if protected:
+            interior_cs = interior_cs - mf.CrossSection.batch_boolean(protected, mf.OpType.Add)
+
+    interior_prism = mf.Manifold.extrude(interior_cs, wall_top_z + 20.0).translate((0.0, 0.0, -0.1))
+    bin_chamfer = float(getattr(config, "cutout_chamfer", 0.0) or 0.0)
+
+    cutters = []
+    for pocket in pockets:
+        try:
+            depth = min(max_depth, max(0.25, pocket.depth))
+            if depth <= 0:
+                continue
+            edge = _resolve_access_pocket_edge(pocket, bin_chamfer, depth)
+            local = _build_access_pocket(pocket, depth, edge)
+            if local is None or local.is_empty():
+                continue
+            cutter = (
+                local.rotate((0.0, 0.0, -pocket.rotation))
+                .translate((pocket.x + offset_x, -(pocket.y + offset_y), wall_top_z))
+            )
+            cutter = cutter ^ interior_prism
+            if not cutter.is_empty():
+                cutters.append(cutter)
+        except Exception as e:
+            logger.warning("access pocket %s failed: %s", getattr(pocket, "id", "?"), e)
+
+    if not cutters:
+        return None
+    return mf.Manifold.batch_boolean(cutters, mf.OpType.Add)
+
+
 def _make_polygon_cutouts(
     polygons: list[ScaledPolygon],
     config: GenerateRequest,
@@ -1514,6 +1698,17 @@ class ManifoldSTLGenerator:
                 if fh_chamfers:
                     cutters.append(fh_chamfers)
                 logger.info("chamfer cutouts: %.2fs", time.monotonic() - t1)
+
+        access_pockets = getattr(config, "access_pockets", None) or []
+        if access_pockets:
+            t1 = time.monotonic()
+            pocket_cutters = _make_access_pocket_cutters(
+                access_pockets, config, wall_top_z,
+                wall_top_z - GF_BASE_HEIGHT - 2, offset_x, offset_y,
+            )
+            if pocket_cutters:
+                cutters.append(pocket_cutters)
+            logger.info("access pockets (%d): %.2fs", len(access_pockets), time.monotonic() - t1)
 
         # text labels (recessed cutters + embossed body additions).
         text_body = None

@@ -2,18 +2,23 @@
 
 import { useState, useRef, useCallback, useEffect, useId } from 'react'
 import { AlertTriangle, LayoutGrid, LoaderCircle } from 'lucide-react'
-import type { PlacedTool, TextLabel } from '@/types'
+import type { AccessPocket, PlacedTool, TextLabel } from '@/types'
 import { snapToGrid as snapToGridUtil } from '@/lib/svg'
 import { GRID_UNIT, DISPLAY_SCALE, SNAP_GRID } from '@/lib/constants'
 import type { GridSizingMode } from '@/lib/constants'
 import { BinEditorToolbar } from '@/components/BinEditorToolbar'
 import { BinEditorCanvas } from '@/components/BinEditorCanvas'
+import { AccessPocketControls } from '@/components/AccessPocketControls'
+import { clampPocket, defaultPocket, resizePocketFromCorner } from '@/lib/accessPockets'
 
 interface Props {
   placedTools: PlacedTool[]
   onPlacedToolsChange: (tools: PlacedTool[], label?: string) => void
   textLabels: TextLabel[]
   onTextLabelsChange: (labels: TextLabel[], label?: string) => void
+  accessPockets: AccessPocket[]
+  onAccessPocketsChange: (pockets: AccessPocket[], label?: string) => void
+  binChamfer?: number
   gridX: number
   gridY: number
   partialBins: boolean
@@ -35,7 +40,7 @@ interface Props {
   historyRevision?: number
 }
 
-type Tool = 'select' | 'text'
+type Tool = 'select' | 'text' | 'pocket'
 
 interface AutoLayoutPlacement {
   tool_id: string
@@ -59,6 +64,7 @@ type Selection =
   | { type: 'tool'; toolId: string }
   | { type: 'hole'; toolId: string; holeId: string }
   | { type: 'label'; labelId: string }
+  | { type: 'pocket'; pocketId: string }
   | null
 
 type DragState =
@@ -66,6 +72,9 @@ type DragState =
   | { type: 'rotate'; toolId: string; centerX: number; centerY: number; startAngle: number; origRotation: number; origPoints: { x: number; y: number }[]; origHoles: { id: string; x: number; y: number }[]; origInteriorRings: { x: number; y: number }[][] }
   | { type: 'label'; labelId: string; startX: number; startY: number; origX: number; origY: number }
   | { type: 'rotate-label'; labelId: string; centerX: number; centerY: number; startAngle: number; origRotation: number }
+  | { type: 'pocket'; pocketId: string; startX: number; startY: number; origX: number; origY: number }
+  | { type: 'pocket-resize'; pocketId: string; corner: number; origPocket: AccessPocket }
+  | { type: 'pocket-rotate'; pocketId: string; centerX: number; centerY: number; startAngle: number; origRotation: number }
   | null
 
 function ArrangeProgress({ timeBudget }: { timeBudget: number }) {
@@ -102,6 +111,9 @@ export function BinEditor({
   onPlacedToolsChange,
   textLabels,
   onTextLabelsChange,
+  accessPockets,
+  onAccessPocketsChange,
+  binChamfer = 0,
   gridX,
   gridY,
   partialBins,
@@ -174,10 +186,14 @@ export function BinEditor({
   const onChangeRef = useRef(onPlacedToolsChange)
   const textLabelsRef = useRef(textLabels)
   const onTextLabelsChangeRef = useRef(onTextLabelsChange)
+  const pocketsRef = useRef(accessPockets)
+  const onPocketsChangeRef = useRef(onAccessPocketsChange)
   useEffect(() => { toolsRef.current = placedTools }, [placedTools])
   useEffect(() => { onChangeRef.current = onPlacedToolsChange }, [onPlacedToolsChange])
   useEffect(() => { textLabelsRef.current = textLabels }, [textLabels])
   useEffect(() => { onTextLabelsChangeRef.current = onTextLabelsChange }, [onTextLabelsChange])
+  useEffect(() => { pocketsRef.current = accessPockets }, [accessPockets])
+  useEffect(() => { onPocketsChangeRef.current = onAccessPocketsChange }, [onAccessPocketsChange])
 
   useEffect(() => { onDraggingChange?.(dragging !== null) }, [dragging, onDraggingChange])
 
@@ -361,7 +377,7 @@ export function BinEditor({
   }, [snapEnabled, snapGrid])
 
   const handleToolMouseDown = (toolId: string) => (e: React.MouseEvent) => {
-    if (activeTool === 'text') return
+    if (activeTool !== 'select') return
     e.stopPropagation()
     const tool = placedTools.find(t => t.id === toolId)
     if (!tool) return
@@ -381,7 +397,7 @@ export function BinEditor({
   }
 
   const stopClick = (e: React.MouseEvent) => e.stopPropagation()
-  const stopClickUnlessText = (e: React.MouseEvent) => { if (activeTool !== 'text') e.stopPropagation() }
+  const stopClickUnlessText = (e: React.MouseEvent) => { if (activeTool === 'select') e.stopPropagation() }
 
   const handleRotateMouseDown = (toolId: string) => (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -501,6 +517,8 @@ export function BinEditor({
       const onChange = onChangeRef.current
       const currentLabels = textLabelsRef.current
       const onLabelsChange = onTextLabelsChangeRef.current
+      const currentPockets = pocketsRef.current
+      const onPocketsChange = onPocketsChangeRef.current
 
       if (dragging.type === 'tool') {
         const origCenterX = dragging.origPoints.reduce((sum, p) => sum + p.x, 0) / dragging.origPoints.length
@@ -585,9 +603,32 @@ export function BinEditor({
           return { ...l, rotation: (dragging.origRotation + deltaAngle) % 360 }
         })
         onLabelsChange(updated, 'Rotate label')
+      } else if (dragging.type === 'pocket') {
+        const newX = snapToGrid(dragging.origX + (pos.x - dragging.startX))
+        const newY = snapToGrid(dragging.origY + (pos.y - dragging.startY))
+        onPocketsChange(
+          currentPockets.map(p => p.id === dragging.pocketId ? { ...p, x: newX, y: newY } : p),
+          'Move pocket',
+        )
+      } else if (dragging.type === 'pocket-resize') {
+        onPocketsChange(
+          currentPockets.map(p => p.id === dragging.pocketId
+            ? clampPocket(resizePocketFromCorner(dragging.origPocket, dragging.corner, pos.x, pos.y), maxCutoutDepth)
+            : p),
+          'Resize pocket',
+        )
+      } else if (dragging.type === 'pocket-rotate') {
+        const currentAngle = Math.atan2(pos.y - dragging.centerY, pos.x - dragging.centerX)
+        const deltaAngle = (currentAngle - dragging.startAngle) * (180 / Math.PI)
+        onPocketsChange(
+          currentPockets.map(p => p.id === dragging.pocketId
+            ? { ...p, rotation: (dragging.origRotation + deltaAngle) % 360 }
+            : p),
+          'Rotate pocket',
+        )
       }
     })
-  }, [dragging, screenToMm, snapToGrid, isInsideCutout])
+  }, [dragging, screenToMm, snapToGrid, isInsideCutout, maxCutoutDepth])
 
   const handleMouseUp = useCallback(() => {
     if (rafRef.current) {
@@ -656,6 +697,16 @@ export function BinEditor({
       return
     }
 
+    if (activeTool === 'pocket') {
+      const pos = screenToMm(e.clientX, e.clientY)
+      if (pos.x >= 0 && pos.x <= binWidthMm && pos.y >= 0 && pos.y <= binHeightMm) {
+        const pocket = defaultPocket('rectangle', snapToGrid(pos.x), snapToGrid(pos.y))
+        onAccessPocketsChange([...accessPockets, pocket], 'Add pocket')
+        setSelection({ type: 'pocket', pocketId: pocket.id })
+      }
+      return
+    }
+
     setSelection(null)
   }
 
@@ -677,6 +728,10 @@ export function BinEditor({
     ? placedTools
         .find(t => t.id === selection.toolId)
         ?.finger_holes.find(fh => fh.id === selection.holeId)
+    : null
+
+  const selectedPocket = selection?.type === 'pocket'
+    ? accessPockets.find(p => p.id === selection.pocketId) ?? null
     : null
 
   const updateSelectedLabel = (updates: Partial<TextLabel>) => {
@@ -708,6 +763,69 @@ export function BinEditor({
   const handleHoleClick = (toolId: string, holeId: string, e: React.MouseEvent) => {
     e.stopPropagation()
     setSelection({ type: 'hole', toolId, holeId })
+  }
+
+  const updateSelectedPocket = (updates: Partial<AccessPocket>, label = 'Change pocket') => {
+    if (selection?.type !== 'pocket') return
+    onAccessPocketsChange(
+      accessPockets.map(pocket =>
+        pocket.id === selection.pocketId ? clampPocket({ ...pocket, ...updates }, maxCutoutDepth) : pocket
+      ),
+      label,
+    )
+  }
+
+  const handlePocketClick = (pocketId: string, e: React.MouseEvent) => {
+    if (activeTool !== 'select') return
+    e.stopPropagation()
+    setSelection({ type: 'pocket', pocketId })
+  }
+
+  const handlePocketMouseDown = (pocketId: string) => (e: React.MouseEvent) => {
+    if (activeTool !== 'select') return
+    e.stopPropagation()
+    const pocket = accessPockets.find(p => p.id === pocketId)
+    if (!pocket) return
+    arrangeInputVersion.current += 1
+    setSelection({ type: 'pocket', pocketId })
+    const pos = screenToMm(e.clientX, e.clientY)
+    setDragging({ type: 'pocket', pocketId, startX: pos.x, startY: pos.y, origX: pocket.x, origY: pocket.y })
+  }
+
+  const handlePocketResizeMouseDown = (pocketId: string, corner: number) => (e: React.MouseEvent) => {
+    e.stopPropagation()
+    const pocket = accessPockets.find(p => p.id === pocketId)
+    if (!pocket) return
+    setSelection({ type: 'pocket', pocketId })
+    setDragging({ type: 'pocket-resize', pocketId, corner, origPocket: { ...pocket } })
+  }
+
+  const handlePocketRotateMouseDown = (pocketId: string) => (e: React.MouseEvent) => {
+    e.stopPropagation()
+    const pocket = accessPockets.find(p => p.id === pocketId)
+    if (!pocket) return
+    const pos = screenToMm(e.clientX, e.clientY)
+    const startAngle = Math.atan2(pos.y - pocket.y, pos.x - pocket.x)
+    setSelection({ type: 'pocket', pocketId })
+    setDragging({
+      type: 'pocket-rotate', pocketId,
+      centerX: pocket.x, centerY: pocket.y, startAngle, origRotation: pocket.rotation,
+    })
+  }
+
+  const handleDuplicatePocket = () => {
+    if (selection?.type !== 'pocket') return
+    const pocket = accessPockets.find(p => p.id === selection.pocketId)
+    if (!pocket) return
+    const copy = { ...pocket, id: `${pocket.id}-copy-${Date.now().toString(36)}`, x: pocket.x + 6, y: pocket.y + 6 }
+    onAccessPocketsChange([...accessPockets, copy], 'Duplicate pocket')
+    setSelection({ type: 'pocket', pocketId: copy.id })
+  }
+
+  const handleDeletePocket = () => {
+    if (selection?.type !== 'pocket') return
+    onAccessPocketsChange(accessPockets.filter(p => p.id !== selection.pocketId), 'Remove pocket')
+    setSelection(null)
   }
 
   const handleEditingLabelKeyDown = (e: React.KeyboardEvent) => {
@@ -883,6 +1001,18 @@ export function BinEditor({
           )}
         </div>
       )}
+      {selectedPocket && (
+        <div className="absolute top-3 right-3 z-20 max-h-[calc(100%-1.5rem)] overflow-y-auto">
+          <AccessPocketControls
+            pocket={selectedPocket}
+            binChamfer={binChamfer}
+            maxDepth={maxCutoutDepth}
+            onChange={updateSelectedPocket}
+            onDuplicate={handleDuplicatePocket}
+            onDelete={handleDeletePocket}
+          />
+        </div>
+      )}
       <BinEditorCanvas
         svgRef={svgRef}
         displayWidth={displayWidth}
@@ -907,6 +1037,13 @@ export function BinEditor({
         binHeightMm={binHeightMm}
         defaultCutoutDepth={defaultCutoutDepth}
         halfGridBase={halfGridBase}
+        accessPockets={accessPockets}
+        binChamfer={binChamfer}
+        pocketMaxDepth={maxCutoutDepth}
+        onPocketMouseDown={handlePocketMouseDown}
+        onPocketRotateMouseDown={handlePocketRotateMouseDown}
+        onPocketResizeMouseDown={handlePocketResizeMouseDown}
+        onPocketClick={handlePocketClick}
         handleR={handleR}
         handleStroke={handleStroke}
         handleOffset={handleOffset}

@@ -29,6 +29,7 @@ export const FACTORY_BIN_CONFIG: BinConfig = {
   partial_bins_retain_wall: false,
   bed_size: 256,
   text_labels: [],
+  access_pockets: [],
 }
 
 export function buildBinConfig(overrides: Partial<BinDefaults> | null = null): BinConfig {
@@ -36,6 +37,7 @@ export function buildBinConfig(overrides: Partial<BinDefaults> | null = null): B
       ...FACTORY_BIN_CONFIG,
       ...(overrides || {}),
       text_labels: [] as BinConfig["text_labels"],
+      access_pockets: ((overrides as Partial<BinConfig> | null)?.access_pockets ?? []).map(pocket => ({ ...pocket })),
   };
   const expectedLength = Math.ceil(merged.grid_x) * Math.ceil(merged.grid_y);
   if (!merged.partial_bins_values || merged.partial_bins_values.length !== expectedLength) {
@@ -45,7 +47,8 @@ export function buildBinConfig(overrides: Partial<BinDefaults> | null = null): B
 }
 
 export function binDefaultsFromConfig(config: Partial<BinConfig>): BinDefaults {
-  const { text_labels: _textLabels, ...defaults } = buildBinConfig(config)
+  // access pockets are bin-local, never part of the saved library defaults
+  const { text_labels: _textLabels, access_pockets: _accessPockets, ...defaults } = buildBinConfig(config)
   return defaults
 }
 

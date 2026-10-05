@@ -91,6 +91,69 @@ class Polygon(BaseModel):
     interior_rings: list[list[Point]] = []
 
 
+AccessPocketShape = Literal["rectangle", "scoop"]
+AccessPocketEdge = Literal["inherit", "sharp", "chamfer", "fillet"]
+
+MIN_ACCESS_POCKET_SIZE_MM = 1.0
+
+
+class AccessPocket(BaseModel):
+    """A bin-local finger-access pocket cut into the bin's usable interior.
+
+    ``length``/``width`` are the nominal opening dimensions *before* the
+    opening-edge finish (chamfer/fillet) widens the rim; the finish never
+    shrinks the usable space. ``depth`` is the vertical cut below the bin's
+    usable surface. Coordinates are bin-space millimetres with the origin at
+    the top-left, ``rotation`` in degrees (clockwise on screen, Y-down).
+
+    ``shape="scoop"`` is a genuine rounded three-dimensional trough: a
+    half-sausage (a capsule cut lengthwise) with a curved bottom and rounded
+    ends, vertically scaled so ``width`` and ``depth`` are independent. Its
+    curvature is intrinsic, so ``corner_radius``/``bottom_radius`` do not apply.
+
+    ``edge`` selects the opening-edge finish: ``inherit`` follows the bin's
+    cutout chamfer, ``sharp`` is an explicit override, ``chamfer`` is a 45°
+    (equal vertical and horizontal) chamfer, ``fillet`` is a convex round.
+    ``edge_size`` is the chamfer's leg length or the fillet's radius.
+    """
+
+    id: str
+    shape: AccessPocketShape = "rectangle"
+    x: float = Field(allow_inf_nan=False)
+    y: float = Field(allow_inf_nan=False)
+    length: float = Field(default=30.0, ge=MIN_ACCESS_POCKET_SIZE_MM, allow_inf_nan=False)
+    width: float = Field(default=20.0, ge=MIN_ACCESS_POCKET_SIZE_MM, allow_inf_nan=False)
+    depth: float = Field(default=12.0, ge=MIN_ACCESS_POCKET_SIZE_MM, allow_inf_nan=False)
+    rotation: float = Field(default=0.0, allow_inf_nan=False)
+    edge: AccessPocketEdge = "inherit"
+    edge_size: float = Field(default=1.0, ge=0.0, allow_inf_nan=False)
+    corner_radius: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
+    bottom_radius: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_geometry(self) -> "AccessPocket":
+        if self.shape == "scoop":
+            if self.corner_radius > 0 or self.bottom_radius > 0:
+                raise ValueError(
+                    "a rounded scoop has intrinsic curvature; corner and bottom radius do not apply"
+                )
+            return self
+        half = min(self.length, self.width) / 2
+        if self.corner_radius > half:
+            raise ValueError(
+                f"corner radius must not exceed {half:g}mm for a "
+                f"{self.length:g}x{self.width:g}mm opening"
+            )
+        if self.bottom_radius > min(self.depth, half):
+            raise ValueError(
+                "bottom radius must not exceed the pocket depth or half the "
+                "smaller opening dimension"
+            )
+        if self.edge in ("chamfer", "fillet") and self.edge_size >= self.depth:
+            raise ValueError("opening-edge size must be smaller than the pocket depth")
+        return self
+
+
 class UploadResponse(BaseModel):
     session_id: str
     image_url: str
@@ -252,6 +315,7 @@ class BinDefaults(BinParams):
 class GenerateRequest(BinDefaults):
     polygons: list[Polygon] | None = None  # optional: use these instead of session polygons
     text_labels: list[TextLabel] = []
+    access_pockets: list[AccessPocket] = []
 
 
 class GenerateResponse(BaseModel):
@@ -752,6 +816,7 @@ class PlacedTool(BaseModel):
 
 class BinConfig(BinDefaults):
     text_labels: list[TextLabel] = []
+    access_pockets: list[AccessPocket] = []
 
 
 class ImportedBinModel(BaseModel):
