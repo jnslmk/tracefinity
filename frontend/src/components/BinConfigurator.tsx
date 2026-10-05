@@ -49,6 +49,8 @@ function Toggle({ checked, onChange, label, help, disabled }: { checked: boolean
       <button
         type="button"
         disabled={disabled}
+        aria-label={label}
+        aria-pressed={checked}
         onClick={() => onChange(!checked)}
         className={`relative inline-flex h-5 w-9 items-center rounded transition-colors ${
           checked ? 'bg-accent' : 'bg-elevated'
@@ -404,6 +406,12 @@ export function BinConfigurator({ config, onChange, gridSizingMode, onGridSizing
               max={10}
               unit="u"
               onChange={(v) => update({ rim_units: v })}
+            />
+            <Toggle
+              checked={config.stacking_lip_empty_cells}
+              onChange={(v) => update({ stacking_lip_empty_cells: v })}
+              label="Stacking lips on empty cells"
+              help="Adds a standard 1×1 stacking lip to every full 42mm cell that has no tool, finger-hole or access-pocket cutout, so smaller bins can stack inside this one, away from its outer edges. Follows the raised rim."
             />
           </div>
         )}

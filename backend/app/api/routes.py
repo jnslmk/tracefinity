@@ -2639,6 +2639,7 @@ def generate_bin_stl(request: Request, bin_id: str, user_id: str = Depends(get_u
         magnet_depth=bc.magnet_depth,
         magnet_corners_only=bc.magnet_corners_only,
         stacking_lip=bc.stacking_lip,
+        stacking_lip_empty_cells=bc.stacking_lip_empty_cells,
         rim_units=bc.rim_units,
         wall_thickness=bc.wall_thickness,
         cutout_depth=bc.cutout_depth,

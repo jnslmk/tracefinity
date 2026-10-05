@@ -34,6 +34,8 @@ same physical maximum.
 
 **Raise lip** -- extends the wall and stacking lip upward by this many units (7mm each) above the floor face, leaving the interior open. Use it for shallow bins where a tool protrudes above the floor: the raised lip lets a stacked bin clear the protruding tool. 0 = standard (lip sits at the floor face). Shown only when the stacking lip is on.
 
+**Stacking lips on empty cells** -- adds a built-in standard 1×1 stacking lip to every full 42mm cell that has no tool, finger-hole or access-pocket cutout. This lets smaller bins stack inside a larger bin, away from its outer edges, so they do not depend on the outer rim. The inner lips follow the raised rim. Off by default, and shown only when the stacking lip is on; turning the outer lip off keeps the choice dormant rather than clearing it.
+
 **Contrast insert** -- generates a separate STL to print in a different colour. The pocket is deepened automatically to accommodate the insert thickness.
 
 **Partial Bins** -- disables individual grid cells, removing them from the shell.

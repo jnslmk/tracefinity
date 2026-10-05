@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 from app.constants import GF_GRID
 
 # Bump when geometry changes so saved previews and exports regenerate.
-STL_GEOMETRY_VERSION = 7
+STL_GEOMETRY_VERSION = 8
 
 GF_HALF_GRID = GF_GRID / 2  # 21mm
 GF_HEIGHT_UNIT = 7.0
@@ -536,6 +536,93 @@ def _add_lip_features(
         else additions[0]
     )
     return body + lip_geom
+
+
+# ── empty-cell stacking lips ──────────────────────────────────────────────────
+
+# The probe band starts just beneath the floor face so a cutout that reaches the
+# surface disqualifies the cell, and rises past the lip top to catch flares and
+# embossed text standing above it.
+EMPTY_CELL_LIP_PROBE_BELOW = 0.1  # mm below the floor face
+
+
+def _empty_cell_lip_origins(
+    config: GenerateRequest, wall_top_z: float, blockers=None
+) -> list[tuple[float, float]]:
+    """Cell centres of full, enabled, cutout-free 1x1 cells that may take a lip.
+
+    Eligibility is read from the real cutter/embossed solids rather than a
+    second approximation of the tool contours: the XY shadow of everything
+    inside the lip's z band must miss the cell's 42mm square. That covers
+    prepared clearance and smoothing, finger holes, chamfer widening,
+    access-pocket opening finishes and text. Only full cells count, so a
+    fractional trailing cell never gets a lip.
+    """
+    import manifold3d as mf
+
+    full_x = int(math.floor(config.grid_x + 1e-9))
+    full_y = int(math.floor(config.grid_y + 1e-9))
+    if full_x < 1 or full_y < 1:
+        return []
+
+    shadow = None
+    if blockers is not None and not blockers.is_empty():
+        rim_height = (getattr(config, "rim_units", 0) or 0) * GF_HEIGHT_UNIT
+        lip_total = LIP_D0 + LIP_D1 + LIP_D2
+        band_bottom = wall_top_z - EMPTY_CELL_LIP_PROBE_BELOW
+        band_top = wall_top_z + rim_height + lip_total + 1.0
+        band = mf.Manifold.extrude(
+            _cs(_rounded_rect_pts(
+                config.grid_x * GF_GRID - 0.5,
+                config.grid_y * GF_GRID - 0.5,
+                GF_CORNER_R,
+            )),
+            band_top - band_bottom,
+        ).translate((0.0, 0.0, band_bottom))
+        banded = blockers ^ band
+        if not banded.is_empty():
+            shadow = banded.project()
+
+    probe = mf.CrossSection.square((GF_GRID, GF_GRID), center=True)
+    origins: list[tuple[float, float]] = []
+    for iy in range(full_y):
+        for ix in range(full_x):
+            if not _cell_enabled(config, ix, iy):
+                continue
+            cx, cy = _cell_center(ix, iy, config.grid_x, config.grid_y)
+            if shadow is not None and (probe.translate((cx, cy)) ^ shadow).area() > 1e-6:
+                continue
+            origins.append((cx, cy))
+    return origins
+
+
+def _add_empty_cell_lips(
+    body, config: GenerateRequest, wall_top_z: float, blockers=None
+):
+    """Raise a standard 1x1 lip on every cutout-free full cell of a larger bin.
+
+    Called only when the stacking lip and empty-cell lips are both on. A smaller
+    bin's base seats in each cell lip exactly as it would on the bin's outer
+    rim, so the outer lip and rim height are unchanged.
+    """
+    import manifold3d as mf
+
+    origins = _empty_cell_lip_origins(config, wall_top_z, blockers)
+    if not origins:
+        return body
+
+    # same rim collar + lip profile as the bin's outer edge, sized to one cell
+    cell_lip = _add_lip_features(
+        mf.Manifold(), config, GF_GRID - 0.5, GF_GRID - 0.5, wall_top_z,
+    )
+    if cell_lip.is_empty():
+        return body
+    if len(origins) == 1:
+        return body + cell_lip.translate((origins[0][0], origins[0][1], 0.0))
+    lips = mf.Manifold.batch_boolean(
+        [cell_lip.translate((cx, cy, 0.0)) for cx, cy in origins], mf.OpType.Add,
+    )
+    return body + lips
 
 
 # ── cutter builders ───────────────────────────────────────────────────────────
@@ -1735,11 +1822,22 @@ class ManifoldSTLGenerator:
             logger.info("text labels: %.2fs", time.monotonic() - t1)
 
         # single boolean subtraction for all cutters
+        all_cutters = None
         if cutters:
             t1 = time.monotonic()
             all_cutters = mf.Manifold.batch_boolean(cutters, mf.OpType.Add)
             bin_body = bin_body - all_cutters
             logger.info("subtract all cutters: %.2fs", time.monotonic() - t1)
+
+        # interior stacking lips are added after the cutters so none can clip
+        # them; the same solids decide which cells stay cutout-free
+        if config.stacking_lip and getattr(config, "stacking_lip_empty_cells", False):
+            t1 = time.monotonic()
+            blockers = all_cutters
+            if text_body is not None and not text_body.is_empty():
+                blockers = text_body if blockers is None else blockers + text_body
+            bin_body = _add_empty_cell_lips(bin_body, config, wall_top_z, blockers)
+            logger.info("empty-cell lips: %.2fs", time.monotonic() - t1)
 
         logger.info("total generate_bin: %.2fs", time.monotonic() - t0)
 

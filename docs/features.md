@@ -59,6 +59,7 @@ Reference for AI agents. Check here before suggesting new features or claiming s
 - Magnets at corners only option
 - Stacking lip toggle
 - Raise lip (extend wall/lip above the floor face in 7mm units so a stacked bin clears a protruding tool)
+- Stacking lips on empty cells (built-in 1×1 lips on cutout-free full cells so smaller bins can stack inside a larger bin, away from its edges)
 - Half-grid base (21mm cells for finer baseplate positioning)
 - Insert mode (contrast insert with configurable height)
 - Bed size for auto-splitting large bins

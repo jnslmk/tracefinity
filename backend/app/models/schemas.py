@@ -209,6 +209,9 @@ class BinParams(BaseModel):
     magnet_depth: float = 2.4
     magnet_corners_only: bool = False
     stacking_lip: bool = True
+    # raise a standard 1x1 stacking lip on every cutout-free full cell so
+    # smaller bins can stack inside a larger traced bin; dormant without stacking_lip
+    stacking_lip_empty_cells: bool = False
     rim_units: int = 0  # extra height units (x7mm) the wall/lip rises above the floor face
     wall_thickness: float = 1.6
     cutout_depth: float = 20.0

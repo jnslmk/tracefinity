@@ -162,6 +162,10 @@ export interface BinDefaults {
   magnet_depth: number
   magnet_corners_only: boolean
   stacking_lip: boolean
+  /** Add a standard 1×1 stacking lip to every cutout-free full cell so smaller
+   *  bins can stack inside a larger bin, away from its outer edges. Requires
+   *  stacking_lip; kept dormant rather than cleared while the outer lip is off. */
+  stacking_lip_empty_cells: boolean
   rim_units: number
   wall_thickness: number
   cutout_depth: number

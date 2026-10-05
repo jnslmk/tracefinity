@@ -14,6 +14,7 @@ export const FACTORY_BIN_CONFIG: BinConfig = {
   magnet_depth: 2.4,
   magnet_corners_only: false,
   stacking_lip: true,
+  stacking_lip_empty_cells: false,
   rim_units: 0,
   wall_thickness: 1.6,
   cutout_depth: 20,

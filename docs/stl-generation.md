@@ -131,6 +131,7 @@ record, and `<artefact> not found` otherwise.
 - **Raised rim**: with `rim_units > 0`, a hollow perimeter collar extends the wall from the floor face up by `rim_units * 7`mm, leaving the interior open. The stacking lip rides on top of the collar.
 - **Lip base**: `height_units * 7 + rim_units * 7` (= wall top when `rim_units == 0`).
 - **Stacking lip top**: lip base + 4.4mm (d0=1.9 + d1=1.8 + d2=0.7). Do NOT use bounding box max Z.
+- **Empty-cell stacking lips**: `stacking_lip_empty_cells` adds that same lip profile (and raised-rim collar) on every cutout-free full cell, based at the floor face. It does not change the outer lip height.
 - **Maximum pocket depth**: `height_units * 7 - 4.75 - 2`mm, preserving the base and a 2mm floor. The lip and raised rim do not reduce this. At 1u the physical maximum is 0.25mm and takes precedence over the usual 5mm minimum, including for per-cutout overrides and insert allowances.
 - **Pocket extrude margin**: 0.01mm epsilon for boolean cleanliness.
 
@@ -191,6 +192,44 @@ Bed splitting uses the **full** `grid_x` / `grid_y` footprint when connect mode 
 Labels are generated on a single floor chosen from the label centre (`wall_top_z` or
 `cutout_floor_z`, depending on whether the centre is inside a tool polygon).
 When partial bins disable a cell, labels in that cell are skipped entirely.
+
+## Empty-cell stacking lips
+
+`stacking_lip_empty_cells` (default `false`, on `BinParams` / `GenerateRequest`)
+raises a second standard 1x1 stacking lip on every **full** grid cell whose top
+surface is cutout-free, so smaller bins can stack inside a larger traced bin
+without relying on its outer rim. It is dormant unless `stacking_lip` is on, and
+the outer lip and `rim_units` collar are unchanged.
+
+`_add_empty_cell_lips` runs after the single cutter subtraction so no cutout can
+clip the new lips, and reuses `_add_lip_features` at one cell's footprint
+(`GF_GRID - 0.5`). Each lip therefore carries exactly the profile a 1x1 bin's
+base seats into, at the bin's own lip base (floor face plus any raised rim).
+Adjacent cells pitch 42mm apart with a 0.5mm gap, so several 1x1 bins and a
+multi-base-cell upper bin (for example 2x1) both seat.
+
+Eligibility (`_empty_cell_lip_origins`) is read from the **same** solids that are
+subtracted, not from a second tool-contour approximation:
+
+- The XY shadow of every cutter and embossed label inside the lip's z band
+  (0.1mm below the floor face to 1mm past the lip top) is taken with
+  `Manifold.project()`.
+- A cell keeps a lip only when its 42x42mm square misses that shadow, so prepared
+  cutout clearance and smoothing, finger holes, `cutout_chamfer` widening,
+  access-pocket opening finishes, engraved labels and embossed labels all
+  disqualify each cell they overlap.
+- Only full cells count (`ix < floor(grid_x)`, `iy < floor(grid_y)`), so a
+  fractional trailing cell never gets a lip. This is independent of
+  `half_grid_base`, which only changes the bottom base cells.
+- Disabled partial-bin cells keep no lip.
+
+A lip only ever adds material, so it cannot obstruct a cutout: its cell is
+cutout-free by construction. Because the added lips sit above the floor face,
+stacking a same-size bin on a bin that uses this option reports a
+`support_error` from `assess_printed_bin` rather than an intact mating — the
+raised cell lips are real printed material. `STL_GEOMETRY_VERSION` is bumped with
+this geometry so saved previews and exports regenerate while records written
+before the field existed generate unchanged.
 
 ## Base geometry (per cell, reverse-engineered from gridfinity-build123d)
 

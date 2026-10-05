@@ -250,6 +250,23 @@ generator clamps it (as it does for tool cutouts); clients should surface the
 effective depth. `POST /api/bins/{id}/generate` accepts a bin with no placed
 tools when it has at least one access pocket (`400` otherwise).
 
+`bin_config.stacking_lip_empty_cells` (default `false`) raises a standard 1x1
+stacking lip on every **full** grid cell whose top surface is cutout-free, so
+smaller bins can stack inside a larger traced bin without its outer rim. It is
+dormant unless `stacking_lip` is on; the outer lip and `rim_units` collar are
+unchanged. An upper bin seats in a cell lip with the same base profile as the
+bin's own rim, and adjacent cells (42 mm pitch, 0.5 mm gap) accept several 1x1
+bins or one multi-base-cell upper bin.
+
+Eligibility is computed from the actual cutter solids when the bin is generated:
+prepared cutout clearance and smoothing, finger holes, `cutout_chamfer`
+widening, access-pocket opening finishes, and engraved or embossed labels all
+disqualify every cell they overlap, and a fractional trailing cell never gets a
+lip. `half_grid_base` only changes the bottom base cells and does not affect
+which cells are eligible. The field persists with the rest of `bin_config`
+through `PUT /api/bins/{id}` and is returned by bin reads; records written before
+it existed load with `false`, and their generated geometry is unchanged.
+
 Bin detail includes a derived `height_assessment`. Height planning returns
 `{assessment, alternatives}`. Each alternative identifies its strategy, whether
 measurements are complete, proposed `bin_config` and `placed_tools`, any explicit
