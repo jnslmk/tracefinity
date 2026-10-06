@@ -55,6 +55,37 @@ class CaptureCrop(BaseModel):
         return v
 
 
+class CaptureFrame(BaseModel):
+    """Source-position metadata, not calibrated camera intrinsics."""
+
+    source_width: int = Field(gt=0)
+    source_height: int = Field(gt=0)
+    corrected_to_source: list[list[float]]
+    optical_center: Point
+    full_frame_width: float = Field(gt=0, allow_inf_nan=False)
+    full_frame_height: float = Field(gt=0, allow_inf_nan=False)
+
+    @field_validator("corrected_to_source")
+    @classmethod
+    def validate_transform(cls, value: list[list[float]]) -> list[list[float]]:
+        if len(value) != 3 or any(len(row) != 3 for row in value):
+            raise ValueError("capture transform must be a 3x3 matrix")
+        if not all(math.isfinite(v) for row in value for v in row):
+            raise ValueError("capture transform must be finite")
+        magnitude = max(abs(v) for row in value for v in row)
+        if magnitude == 0:
+            raise ValueError("capture transform must be invertible")
+        a, b, c = ([v / magnitude for v in row] for row in value)
+        determinant = (
+            a[0] * (b[1] * c[2] - b[2] * c[1])
+            - a[1] * (b[0] * c[2] - b[2] * c[0])
+            + a[2] * (b[0] * c[1] - b[1] * c[0])
+        )
+        if determinant == 0:
+            raise ValueError("capture transform must be invertible")
+        return value
+
+
 class PhotoWarning(BaseModel):
     code: str
     message: str
@@ -177,6 +208,7 @@ class CornersResponse(BaseModel):
     corrected_image_url: str
     scale_factor: float
     warnings: list[PhotoWarning] = []
+    capture_frame: CaptureFrame | None = None
     station: "PhotoStation | None" = None
 
 
@@ -367,6 +399,7 @@ class Session(BaseModel):
     original_image_width: int | None = None
     original_image_height: int | None = None
     capture_crop: CaptureCrop | None = None
+    capture_frame: CaptureFrame | None = None
     corrected_image_path: str | None = None
     mask_image_path: str | None = None
     corners: list[Point] | None = None

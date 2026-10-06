@@ -12,6 +12,7 @@ import { Alert } from '@/components/Alert'
 import { getSession, setCorners, traceTools, updatePolygons, updateSession, getImageUrl, getAvailableKeys, traceFromMask, saveToolsFromSession } from '@/lib/api'
 import { CornersHint, TraceHint, EditHint } from '@/components/OnboardingIllustrations'
 import { PhotoWarningsBanner } from '@/components/PhotoWarningsBanner'
+import { ToolCaptureAdvice } from '@/components/ToolCaptureAdvice'
 import { StepBar } from '@/components/StepBar'
 import type { PaperSize, PhotoWarning, Point, Polygon, Session } from '@/types'
 
@@ -181,6 +182,11 @@ export default function TracePage() {
       setImageVersion(Date.now())
       setPhotoWarnings(result.warnings ?? [])
       setWarningsDismissed(false)
+      setSession(current => current ? {
+        ...current,
+        scale_factor: result.scale_factor,
+        capture_frame: result.capture_frame ?? null,
+      } : current)
 
       if (singleTracer && tracers.length === 1) {
         // single tracer: trace immediately without changing step
@@ -647,6 +653,12 @@ export default function TracePage() {
                   })}
                 </div>
               )}
+              <ToolCaptureAdvice
+                polygons={polygons}
+                captureFrame={session?.capture_frame}
+                hoveredPolygon={hoveredPolygon}
+                onHoveredChange={setHoveredPolygon}
+              />
             </div>
           )}
           </div>

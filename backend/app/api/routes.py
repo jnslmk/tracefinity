@@ -1064,18 +1064,35 @@ async def set_corners(request: Request, session_id: str, req: CornersRequest, us
     except Exception:
         logger.exception("photo checks skipped")
 
-    output_path, scale_factor = image_processor.apply_perspective_correction(
+    output_path, scale_factor, capture_frame = image_processor.apply_perspective_correction(
         _abs(session.original_image_path), corners, req.paper_size
     )
 
     # resize the corrected image to save storage; adjust scale_factor so
     # pixel→mm conversion stays correct after the image shrinks.
     corrected_bytes = Path(output_path).read_bytes()
+    warped_width, warped_height = _image_dimensions(corrected_bytes)
     ext = Path(output_path).suffix
     corrected_bytes, _, ds_ratio = _ingest_with_limits(corrected_bytes, ext, MAX_UPLOAD_DIM)
     Path(output_path).write_bytes(corrected_bytes)
     if ds_ratio < 1.0:
         scale_factor /= ds_ratio
+
+    final_width, final_height = _image_dimensions(corrected_bytes)
+    # Compose the inverse resize with the actual inverse warp. The short axis
+    # rounds independently at ingest, so a single downscale ratio is not enough.
+    capture_frame.corrected_to_source = [
+        [row[0] * warped_width / final_width, row[1] * warped_height / final_height, row[2]]
+        for row in capture_frame.corrected_to_source
+    ]
+    if session.capture_crop is not None:
+        crop = session.capture_crop
+        capture_frame.optical_center = Point(
+            x=(0.5 - crop.x) / crop.width * capture_frame.source_width,
+            y=(0.5 - crop.y) / crop.height * capture_frame.source_height,
+        )
+        capture_frame.full_frame_width = capture_frame.source_width / crop.width
+        capture_frame.full_frame_height = capture_frame.source_height / crop.height
 
     up = _user_path(user_id)
     orig_path = _abs(session.original_image_path)
@@ -1090,22 +1107,23 @@ async def set_corners(request: Request, session_id: str, req: CornersRequest, us
             source_image_path=orig_path,
         )
 
-    # the original is discarded with the correction unless the caller is keeping
-    # it as a plan source (the drawer photo flow sets retain_original)
-    if not req.retain_original and orig_path:
-        Path(orig_path).unlink(missing_ok=True)
     session.corrected_image_path = _rel(output_path, up)
     if not req.retain_original:
         session.original_image_path = None
     session.corners = req.corners
     session.paper_size = req.paper_size
     session.scale_factor = scale_factor
+    session.capture_frame = capture_frame
     session.photo_warnings = photo_warnings or None
     user_sessions.set(session_id, session)
+    # Persist the retained mapping before discarding the original pixels.
+    if not req.retain_original and orig_path:
+        Path(orig_path).unlink(missing_ok=True)
 
     return CornersResponse(
         corrected_image_url=f"/storage/{session.corrected_image_path}",
         scale_factor=scale_factor,
+        capture_frame=capture_frame,
         warnings=photo_warnings,
         station=created_station,
     )

@@ -8,6 +8,9 @@ Reference for AI agents. Check here before suggesting new features or claiming s
 - Paper corner detection with draggable handles
 - Paper size presets (A4, Letter, A3, Tabloid)
 - Photo quality warnings before tracing (camera too close via EXIF focal length, paper cut off at the frame edge, extreme perspective)
+- Named per-tool rephotography advice after automatic or manual-mask tracing: source-edge proximity means potential clipping (check completeness, not proof); outer 15% along either original frame axis is a position heuristic recommending a centered recapture if thick/raised, not a measured error
+- Advice highlights outlines on hover/keyboard focus, follows outline edits and naming changes, and survives session reload via capture-frame metadata; older captures without it report advice unavailable. "No position flags" does not certify accuracy or fit, infer tool heights, or assess blur/lens distortion; distance checks require usable EXIF. Advice never blocks saving or changes tool selection
+- [Capture guidance](usage/uploading-photos.md): wanted tools on one known-size sheet where practical, overhang supported, thin tools batched and bulky tools centered separately; actual distance/lens choice, stable focus and diffuse light rather than crop/zoom alone
 - AI tracing (multiple tracer backends: IS-Net, BiRefNet, InSPyReNet)
 - Remote tracing via Replicate (`REPLICATE_API_TOKEN`, model `men1scus/birefnet` by default; `REPLICATE_RESOLUTION` optional)
 - Remote tracing via fal.ai (`FAL_KEY`, model `fal-ai/birefnet/v2` by default; `FAL_OPERATING_RESOLUTION` default `1024x1024`). Uses `sync_mode` so results are not stored in fal request history; Replicate predictions auto-purge after ~1h.

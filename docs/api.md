@@ -55,7 +55,7 @@ administrator session keeps all of it. See [auth.md](auth.md).
 
 ## Sessions (trace workflow)
 - `POST /api/upload` - upload image, auto-detect corners
-- `POST /api/sessions/{id}/corners` - set corners, apply perspective correction; returns advisory photo warnings (camera too close, paper cut off, extreme perspective)
+- `POST /api/sessions/{id}/corners` - set corners, apply perspective correction; returns `CornersResponse` with scale, capture-frame metadata and advisory photo warnings (camera too close, paper cut off, extreme perspective)
 - `POST /api/sessions/{id}/trace` - AI trace tool outlines
 - `POST /api/sessions/{id}/trace-mask` - trace from uploaded mask
 - `PUT /api/sessions/{id}/polygons` - save polygon edits
@@ -67,6 +67,40 @@ administrator session keeps all of it. See [auth.md](auth.md).
 - `DELETE /api/sessions/{id}` - delete session
 
 Trace and mask-trace responses include the final visible `Polygon.label` values for the trace result. When `TOOL_LABEL_PROVIDER=ollama`, the backend attempts optional naming before persisting the session; naming failures keep the generic `tool N` labels.
+
+### Capture-frame metadata
+
+`CornersResponse` includes `corrected_image_url`, `scale_factor` (millimetres
+per corrected-image pixel), `warnings`, optional `station`, and nullable
+`capture_frame`. The same `CaptureFrame` is persisted as `Session.capture_frame`
+and returned by `GET /api/sessions/{id}`. It defaults to `null` for old sessions
+or captures not yet corrected; TypeScript clients allow an omitted or null field.
+Use the corner response's current scale and mapping, not stale session values.
+
+`CaptureFrame` fields:
+
+| Field | Meaning |
+|-|-|
+| `source_width`, `source_height` | Integer dimensions of the ingested upright/cropped original, in source pixels |
+| `corrected_to_source` | Finite 3×3 float matrix mapping final corrected-image pixels to source-frame pixels; apply to `[x, y, 1]` and divide by the resulting third coordinate |
+| `optical_center` | `Point` (`{x, y}`): estimated pre-crop frame center expressed in source pixels, not calibrated lens intrinsics |
+| `full_frame_width`, `full_frame_height` | Float pre-crop full-frame spans in the same source-pixel units |
+
+For ordinary uploads, full-frame spans equal source dimensions and the estimated
+center is their midpoint. For an explicit normalized `capture_crop` rectangle
+`{x, y, width, height}`, the center is
+`((0.5-x)/width*source_width, (0.5-y)/height*source_height)` and the full-frame
+spans are `source_width/width` and `source_height/height`. Crop edges can still
+clip tools. The mapping includes the actual perspective warp, full-frame offsets
+and final per-axis resize; it is retained before original deletion.
+
+The trace editor derives per-tool advice from current outlines and this metadata,
+not a new endpoint or stored accuracy verdict. It flags proximity to source edges
+as potential clipping and the outer 15% of either full-frame axis as a positional
+heuristic for thick/raised tools. Missing metadata means advice is unavailable;
+neither these flags nor their absence certify accuracy, known tool heights or fit.
+See the [photo guide](usage/uploading-photos.md) for capture recommendations and
+the separate EXIF distance check's limitations.
 
 ## Tools (library)
 - `GET /api/tools` - list tools

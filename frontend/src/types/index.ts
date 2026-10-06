@@ -12,6 +12,16 @@ export interface CaptureCrop {
   height: number
 }
 
+/** Source-position heuristic metadata; not calibrated camera intrinsics. */
+export interface CaptureFrame {
+  source_width: number
+  source_height: number
+  corrected_to_source: [[number, number, number], [number, number, number], [number, number, number]]
+  optical_center: Point
+  full_frame_width: number
+  full_frame_height: number
+}
+
 export interface FingerHole {
   id: string
   x: number
@@ -96,6 +106,7 @@ export interface Session {
   scale_factor: number | null
   focal_length_35mm: number | null
   photo_warnings: PhotoWarning[] | null
+  capture_frame?: CaptureFrame | null
   polygons: Polygon[] | null
   stl_path: string | null
   layout: Layout | null
@@ -126,6 +137,7 @@ export interface CornersResponse {
   corrected_image_url: string
   scale_factor: number
   warnings: PhotoWarning[]
+  capture_frame?: CaptureFrame | null
 }
 
 export interface PhotoStation {

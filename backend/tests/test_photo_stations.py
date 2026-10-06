@@ -10,7 +10,7 @@ from pydantic import ValidationError
 import app.api.routes as routes
 from app.config import ensure_user_dirs, settings
 from app.main import app
-from app.models.schemas import CaptureCrop, PhotoStation, Point, Session
+from app.models.schemas import CaptureCrop, CaptureFrame, PhotoStation, Point, Session
 from app.services.photo_station_store import PhotoStationStore
 
 
@@ -44,6 +44,17 @@ def _image_bytes(size=(120, 160), fmt="PNG"):
     buf = io.BytesIO()
     Image.new("RGB", size, color=(32, 64, 96)).save(buf, format=fmt)
     return buf.getvalue()
+
+
+def _capture_frame():
+    return CaptureFrame(
+        source_width=120,
+        source_height=160,
+        corrected_to_source=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        optical_center=Point(x=60, y=80),
+        full_frame_width=120,
+        full_frame_height=160,
+    )
 
 
 def test_photo_station_feature_flag_defaults_off(tmp_path, monkeypatch):
@@ -615,7 +626,7 @@ def test_set_corners_without_station_does_not_copy_station_photo(tmp_path, monke
         corners=_corners(),
         paper_size="a4",
     ))
-    monkeypatch.setattr(routes.image_processor, "apply_perspective_correction", lambda *_: (str(corrected), 1.0))
+    monkeypatch.setattr(routes.image_processor, "apply_perspective_correction", lambda *_: (str(corrected), 1.0, _capture_frame()))
 
     resp = client.post("/api/sessions/session-1/corners", json={
         "corners": [p.model_dump() for p in _corners()],
@@ -642,7 +653,7 @@ def test_set_corners_with_station_saves_station_photo(tmp_path, monkeypatch):
         corners=_corners(),
         paper_size="a4",
     ))
-    monkeypatch.setattr(routes.image_processor, "apply_perspective_correction", lambda *_: (str(corrected), 1.0))
+    monkeypatch.setattr(routes.image_processor, "apply_perspective_correction", lambda *_: (str(corrected), 1.0, _capture_frame()))
 
     resp = client.post("/api/sessions/session-1/corners", json={
         "corners": [p.model_dump() for p in _corners()],
@@ -673,7 +684,7 @@ def test_set_corners_station_copy_failure_keeps_original_upload(tmp_path, monkey
         corners=_corners(),
         paper_size="a4",
     ))
-    monkeypatch.setattr(routes.image_processor, "apply_perspective_correction", lambda *_: (str(corrected), 1.0))
+    monkeypatch.setattr(routes.image_processor, "apply_perspective_correction", lambda *_: (str(corrected), 1.0, _capture_frame()))
 
     def fail_copy(*_args, **_kwargs):
         raise OSError("copy failed")

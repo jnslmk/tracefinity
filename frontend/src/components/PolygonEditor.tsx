@@ -583,10 +583,12 @@ export function PolygonEditor({
               fill = 'rgba(90, 180, 222, 0.2)'
               stroke = 'rgb(72, 168, 214)'
               strokeW = uiScale * 1.5
-            } else if (isHovered) {
-              fill = 'rgba(90, 180, 222, 0.18)'
+            }
+            // Advice hover/focus must stay visible even on included or edited tools.
+            if (isHovered) {
+              fill = 'rgba(90, 180, 222, 0.3)'
               stroke = 'rgb(90, 180, 222)'
-              strokeW = uiScale * 1.5
+              strokeW += uiScale
             }
 
             return (

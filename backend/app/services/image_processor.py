@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from app.constants import PAPER_SIZES, PaperSize
+from app.models.schemas import CaptureFrame, Point
 
 logger = logging.getLogger(__name__)
 
@@ -389,10 +390,10 @@ class ImageProcessor:
         image_path: str,
         corners: list[tuple[float, float]],
         paper_size: PaperSize,
-    ) -> tuple[str, float]:
-        """warp image to top-down view and return output path + scale factor.
-        includes the full visible area beyond the paper so oversized tools
-        are captured. paper is used for scale only."""
+    ) -> tuple[str, float, CaptureFrame]:
+        """Return output path, scale factor and the actual warp's source mapping.
+        Includes the full visible area beyond the paper so oversized tools
+        are captured. Paper is used for scale only."""
         img = cv2.imread(image_path)
         src = np.array(corners, dtype="float32")
 
@@ -450,7 +451,15 @@ class ImageProcessor:
         cv2.imwrite(str(output_path), warped)
 
         scale_factor = 1.0 / PX_PER_MM
-        return str(output_path), scale_factor
+        capture_frame = CaptureFrame(
+            source_width=w_src,
+            source_height=h_src,
+            corrected_to_source=np.linalg.inv(M_full).tolist(),
+            optical_center=Point(x=w_src / 2, y=h_src / 2),
+            full_frame_width=w_src,
+            full_frame_height=h_src,
+        )
+        return str(output_path), scale_factor, capture_frame
 
     def debug_contour_detection(
         self, image_path: str, output_dir: Path
