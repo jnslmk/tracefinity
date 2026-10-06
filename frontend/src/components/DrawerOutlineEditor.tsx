@@ -69,28 +69,22 @@ export function DrawerOutlineEditor({
           onPolygonsChange={onPolygonsChange}
           editable
           lockedIds={[OUTLINE_ID]}
+          initialActiveId={OUTLINE_ID}
           actions={actions}
         />
       </div>
-
-      <div className="flex-shrink-0 text-[11px] text-text-secondary space-y-0.5">
+      <div className="flex-shrink-0 truncate text-[11px] leading-tight text-text-secondary" title="Boundary measurements">
         {problem ? (
           <p role="alert" className="text-amber-500">{problem}</p>
         ) : (
-          <>
-            <p>
-              <span className="text-text-muted">Extent</span>{' '}
-              {widthMm.toFixed(1)} × {depthMm.toFixed(1)} mm
-              {' · '}
-              <span className="text-text-muted">Area</span>{' '}
-              {(areaMm2 / 100).toFixed(1)} cm² ({(areaMm2 / (GRID_UNIT * GRID_UNIT)).toFixed(2)} grid units)
-              {outline && <> · <span className="text-text-muted">Perimeter</span> {(outlinePerimeter(outline) * scale).toFixed(1)} mm</>}
-            </p>
-            <p className="text-[10px] text-text-muted">
-              The extent is a bounding box, not the containment shape: concavities and exclusions decide what a bin covers.
-              This boundary is photo-derived; physical fit is unverified. Measure the real drawer edge before printing.
-            </p>
-          </>
+          <p className="truncate">
+            <span className="text-text-muted">Extent</span>{' '}
+            {widthMm.toFixed(1)} × {depthMm.toFixed(1)} mm
+            {' · '}
+            <span className="text-text-muted">Area</span>{' '}
+            {(areaMm2 / 100).toFixed(1)} cm² ({(areaMm2 / (GRID_UNIT * GRID_UNIT)).toFixed(2)} grid units)
+            {outline && <> · <span className="text-text-muted">Perimeter</span> {(outlinePerimeter(outline) * scale).toFixed(1)} mm</>}
+          </p>
         )}
       </div>
     </div>

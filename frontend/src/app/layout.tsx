@@ -24,6 +24,7 @@ export default function RootLayout({
   const pathname = usePathname()
 
   const isFullBleed = /^\/(trace|tools|bins|stations)\//.test(pathname)
+    || /^\/projects\/[^/]+\/sketch\/photo\/?$/.test(pathname)
 
   return (
     <html lang="en">

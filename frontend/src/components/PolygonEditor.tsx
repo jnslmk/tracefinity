@@ -28,6 +28,8 @@ interface Props {
   actions?: PolygonEditorAction[]
   /** Polygon ids that cannot be deleted (e.g. a required outer boundary). */
   lockedIds?: string[]
+  /** Open a known outline with its vertex handles already visible. */
+  initialActiveId?: string | null
 }
 // dark halo painted under outlines so they stay legible over photographs
 const HALO_STROKE = 'rgba(2, 6, 23, 0.55)'
@@ -49,6 +51,7 @@ export function PolygonEditor({
   onHoveredChange,
   actions = [],
   lockedIds = [],
+  initialActiveId = null,
 }: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -68,9 +71,9 @@ export function PolygonEditor({
   const uiScale = uiScaleFor(imageSize.width, fitted.width, zoom)
 
   // active polygon for vertex editing (internal)
-  const [activeId, setActiveId] = useState<string | null>(null)
+  const [activeId, setActiveId] = useState<string | null>(initialActiveId ?? null)
   // fallback single-select when no inclusion tracking
-  const [internalSelected, setInternalSelected] = useState<string | null>(null)
+  const [internalSelected, setInternalSelected] = useState<string | null>(initialActiveId ?? null)
 
   const hasInclusion = included !== undefined
   const isIncluded = useCallback((id: string) => {
@@ -422,7 +425,7 @@ export function PolygonEditor({
     <div className="flex flex-col gap-3 h-full min-h-0">
       {/* toolbar */}
       {editable && (
-        <div className="flex items-center gap-4 flex-shrink-0">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 flex-shrink-0">
           <div className="flex gap-1 bg-elevated rounded-[10px] p-1 border border-border">
             <button
               onClick={() => handleModeChange('vertex')}
@@ -497,13 +500,13 @@ export function PolygonEditor({
           ))}
 
           <span className="text-sm text-text-muted">
-            {(editMode === 'select' || editMode === 'vertex') && !activeId && 'Click outlines to select tools'}
+            {(editMode === 'select' || editMode === 'vertex') && !activeId && (hasInclusion ? 'Click outlines to select tools' : 'Click an outline to edit')}
             {(editMode === 'select' || editMode === 'vertex') && activeId && 'Drag vertices to adjust the outline'}
             {editMode === 'add-vertex' && 'Click on an edge to add a vertex'}
             {editMode === 'delete-vertex' && 'Click a vertex to remove it'}
           </span>
 
-          {activeId && (
+          {activeId && !lockedIds.includes(activeId) && (
             <button
               onClick={() => handleDeletePolygon(activeId)}
               className="ml-auto px-3 py-1.5 text-sm text-red-400 hover:bg-red-900/20 rounded border border-red-800 flex items-center gap-1 transition-colors cursor-pointer"

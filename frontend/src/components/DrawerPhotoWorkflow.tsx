@@ -70,6 +70,7 @@ export function DrawerPhotoWorkflow({ projectId, projectName, sketchId }: {
   const [providerLabel, setProviderLabel] = useState<string | null>(null)
   const { paperSize, setPaperSize } = photo
   const [accepting, setAccepting] = useState(false)
+  const reviewing = photo.step === 'review' && !!photo.correctedUrl
 
   useEffect(() => {
     getAvailableKeys()
@@ -86,12 +87,14 @@ export function DrawerPhotoWorkflow({ projectId, projectName, sketchId }: {
   }
 
   return (
-    <div className="max-w-5xl mx-auto p-4 space-y-4">
+    <div className={reviewing ? 'h-[calc(100vh-44px)] flex flex-col w-full' : 'max-w-5xl mx-auto p-4 space-y-4'}>
+      <div className={reviewing ? 'contents' : 'space-y-4'}>
+      {!reviewing && (
+      <>
       <Breadcrumb segments={[
         { label: projectName, href: `/projects/${projectId}` },
         { label: 'New plan from photo', href: `/projects/${projectId}/sketch/photo` },
       ]} />
-
       <div className="space-y-1">
         <h1 className="text-lg text-text-primary">Drawer plan from photo</h1>
         <p className="text-[11px] text-text-muted">
@@ -99,10 +102,15 @@ export function DrawerPhotoWorkflow({ projectId, projectName, sketchId }: {
           the plan stores its own boundary and never becomes a tool.
         </p>
       </div>
-
+      </>
+      )}
+      {(photo.error || photo.warnings.length > 0) && (
+      <div className={reviewing ? 'px-4 pt-3 space-y-3 shrink-0' : 'space-y-3'}>
       {photo.error && <Alert variant="error">{photo.error}</Alert>}
       {photo.warnings.length > 0 && <PhotoWarningsBanner warnings={photo.warnings} onDismiss={photo.clearWarnings} />}
-
+      </div>
+      )}
+      </div>
       {photo.step === 'upload' && (
         <div className="space-y-3">
           <ImageUploader onUpload={file => void photo.upload(file)} disabled={photo.busy} />
@@ -208,22 +216,18 @@ export function DrawerPhotoWorkflow({ projectId, projectName, sketchId }: {
           </button>
         </div>
       )}
-
       {photo.step === 'review' && photo.correctedUrl && (
-        <div className="space-y-3">
-          <div className="h-[55vh]">
-            <DrawerOutlineEditor
-              imageUrl={photo.correctedUrl}
-              polygons={photo.polygons}
-              onPolygonsChange={photo.setPolygons}
-              scaleFactor={photo.scaleFactor}
-              seed={photo.seed}
-              createExclusion={photo.createExclusion}
-              resetOutline={photo.resetOutline}
-            />
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <label className="text-[11px] text-text-secondary">
+        <div className="flex-1 flex flex-col md:flex-row min-h-0">
+          <aside className="md:w-[240px] shrink-0 bg-surface border-b md:border-b-0 md:border-r border-border overflow-y-auto max-h-[35vh] md:max-h-none px-3 py-2 space-y-3">
+            <Breadcrumb segments={[
+              { label: projectName, href: `/projects/${projectId}` },
+              { label: 'Photo plan', href: `/projects/${projectId}/sketch/photo` },
+            ]} />
+            <div>
+              <h2 className="text-sm text-text-primary">Drag the handles to follow the inside floor.</h2>
+              <p className="text-[11px] text-text-secondary">Scroll to zoom, Space-drag to pan, toolbar adds vertices and obstructions.</p>
+            </div>
+            <label className="block text-[11px] text-text-secondary">
               Container-fit clearance (mm)
               <input
                 aria-label="Container-fit clearance"
@@ -236,9 +240,10 @@ export function DrawerPhotoWorkflow({ projectId, projectName, sketchId }: {
                   const value = Number(event.target.value)
                   if (Number.isFinite(value) && value >= 0) photo.setFitClearanceMm(value)
                 }}
-                className="ml-2 w-20 bg-elevated border border-border rounded px-2 py-1"
+                className="mt-1 w-20 bg-elevated border border-border rounded px-2 py-1 block"
               />
             </label>
+            <div className="flex flex-col items-start gap-2">
             <button
               type="button"
               onClick={() => void handleAccept()}
@@ -256,15 +261,28 @@ export function DrawerPhotoWorkflow({ projectId, projectName, sketchId }: {
             <button type="button" onClick={photo.restartCapture} disabled={photo.busy} className="btn-secondary px-2 py-1 text-[11px]">
               Use a different photo
             </button>
+          {sketchId && (
+            <button type="button" disabled={photo.busy || accepting} onClick={() => router.push(`/projects/${projectId}/sketch/${sketchId}`)}
+              className="btn-secondary px-2 py-1 text-[11px]">
+              Cancel edits and return to saved plan
+            </button>
+          )}
           </div>
-          <p className="text-[11px] text-text-muted">
-            Accepting saves the boundary, the source calibration and the clearance onto the plan. A rejected boundary leaves the
-            saved plan untouched. The boundary is traced over a single photo, so its physical fit is unverified until you
-            measure the real drawer edge.
-          </p>
+          </aside>
+          <div className="flex-1 min-w-0 min-h-0 bg-base p-3">
+            <DrawerOutlineEditor
+              imageUrl={photo.correctedUrl}
+              polygons={photo.polygons}
+              onPolygonsChange={photo.setPolygons}
+              scaleFactor={photo.scaleFactor}
+              seed={photo.seed}
+              createExclusion={photo.createExclusion}
+              resetOutline={photo.resetOutline}
+            />
+          </div>
         </div>
       )}
-      {sketchId && (
+      {sketchId && !reviewing && (
         <button type="button" disabled={photo.busy || accepting} onClick={() => router.push(`/projects/${projectId}/sketch/${sketchId}`)}
           className="btn-secondary px-2 py-1 text-[11px]">
           Cancel edits and return to saved plan
