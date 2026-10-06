@@ -43,6 +43,7 @@ tracefinity/
 │   │       ├── tool_store.py              # tool library persistence
 │   │       ├── bin_store.py               # bin persistence
 │   │       ├── project_store.py           # bin project persistence
+│   │       ├── drawer_outline.py          # drawer boundary containment geometry
 │   │       └── project_service.py         # project summaries, health, repair
 │   └── requirements.txt
 ├── frontend/
@@ -52,7 +53,8 @@ tracefinity/
 │   │   │   ├── trace/[id]/            # corner + polygon editing
 │   │   │   ├── tools/[id]/            # tool vertex/hole editor
 │   │   │   ├── projects/[id]/         # project planning workflow
-│   │   │   │   └── sketch/[sketchId]/  # one drawer plan (bin placement on a grid)
+│   │   │   │   ├── sketch/[sketchId]/  # one drawer plan (bin placement on a grid)
+│   │   │   │   └── sketch/photo/       # plan from a calibrated photo
 │   │   │   └── bins/[id]/             # bin builder + 3D preview
 │   │   ├── components/
 │   │   │   ├── BinEditor.tsx          # bin layout orchestrator
@@ -62,6 +64,8 @@ tracefinity/
 │   │   │   ├── BinPreview3D.tsx       # three.js STL viewer
 │   │   │   ├── DrawerSketchCanvas.tsx # drawer plan SVG canvas (drag/drop)
 │   │   │   ├── DrawerSketch3D.tsx     # drawer plan 3D view (loads bin STLs)
+│   │   │   ├── DrawerPhotoWorkflow.tsx # create a plan from a calibrated photo
+│   │   │   ├── DrawerOutlineEditor.tsx # review the boundary and exclusions over the photo
 │   │   │   ├── ToolEditor.tsx         # tool editor orchestrator
 │   │   │   ├── ToolEditorToolbar.tsx  # tool toolbar (mode, smooth, undo)
 │   │   │   ├── ToolEditorCanvas.tsx   # tool SVG canvas
@@ -71,11 +75,13 @@ tracefinity/
 │   │   │   └── ...
 │   │   ├── hooks/
 │   │   │   ├── useDebouncedSave.ts    # debounced auto-save
+│   │   │   ├── useDrawerPhoto.ts      # plan-from-photo state machine
 │   │   │   └── useHistory.ts          # undo/redo state management
 │   │   └── lib/
 │   │       ├── api.ts                 # API client
 │   │       ├── constants.ts           # shared constants
 │   │       ├── drawerLayout.ts        # drawer grid math (footprints, packing)
+│   │       ├── drawerOutline.ts       # boundary containment math (mirrors backend)
 │   │       └── svg.ts                 # polygon path, smoothing, snap
 │   └── package.json
 ├── .github/workflows/
@@ -92,7 +98,7 @@ tracefinity/
 - **PlacedTool**: a positioned copy of a tool in a bin. Points/holes in bin-space mm. Has `tool_id` linking back to source.
 - **Bin**: bin config + placed tools + text labels. Used for STL generation (`bins.json`).
 - **BinProject**: a planning group of tool ids and linked bin ids. Placement status is derived from linked bins (`projects.json`). Projects can carry default bin settings used when creating project bins, plus any number of **ProjectSketch** drawer plans.
-- **ProjectSketch**: one drawer plan owned by a project: a name, an optional drawer grid (`target_grid_x`/`target_grid_y`, 1-40 units) and a `bin_layout` of `ProjectBinPlacement` records (`id`, `bin_id`, `x`, `y`, `rotation`, `color`) positioning linked bins on that grid. A bin may appear several times, so placements are identified by their own id.
+- **ProjectSketch**: one drawer plan owned by a project: name, optional rectangular grid (`target_grid_x`/`target_grid_y`, 1–40 units), and `bin_layout` placement records (`id`, `bin_id`, signed half-unit `x`/`y`, cardinal `rotation`, `color`). A bin may appear several times under separate placement ids. Optional photo context adds a metric `outline` with obstruction rings, a `source` calibration with owned normalized original/corrected images, original-frame paper corners/size, scale and seed, a `grid_alignment` anchor/turn and Euclidean `fit_clearance_mm`. Old records load with defaults. The polygon decides coverage; its bounds transformed to the current grid frame drive scans, packing, capacity, clamps and rendering beyond legacy rectangular limits. Source adoption stages validated image copies under a new version directory before committing matching project metadata; failure removes only the staged files and keeps the old source. Recalibration uses the saved original via the normal upload/corner workflow. Boundary-only Accept omits historical session adoption; a pending replacement/recalibration targets and adopts its own session. Plan/project deletion removes its owned source directory and plan candidate; session candidates are session-owned.
 - **Session**: ephemeral, used only for upload/trace workflow. Output is tools saved to library via `save-tools`.
 
 Each record and generated file belongs to a storage namespace, keyed by the

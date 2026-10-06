@@ -48,6 +48,11 @@ from app.models.schemas import (
     CornersRequest,
     CornersResponse,
     CreateBinRequest,
+    DrawerGridAlignment,
+    DrawerOutline,
+    DrawerOutlineCandidateRequest,
+    DrawerOutlineCandidateResponse,
+    DrawerPhotoCalibration,
     FingerHole,
     GenerateRequest,
     GenerateResponse,
@@ -89,6 +94,7 @@ from app.models.schemas import (
 from app.services.ai_tracer import AITracer
 from app.services.bin_service import sync_placed_tools
 from app.services.bin_store import BinStore
+from app.services.drawer_outline import point_in_polygon, ring_from_points, validate_outline
 from app.services.geometry import optimal_rotation_angle as _optimal_rotation_angle
 from app.services.image_ingest import ImageTooLargeError, ingest_image
 from app.services.image_processor import ImageProcessor
@@ -211,6 +217,113 @@ def _reject_imported_mutation(bin_data: BinModel) -> None:
             status_code=400,
             detail="imported bins are read-only; only the name and project can be changed",
         )
+
+
+def _validated_outline(outline: DrawerOutline | None) -> DrawerOutline | None:
+    """Reject a boundary that is not finite, simple and non-empty before it is saved."""
+    if outline is None:
+        return None
+    try:
+        validate_outline(
+            ring_from_points(outline.points),
+            [ring_from_points(ring) for ring in outline.interior_rings],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return outline
+
+
+def _plan_photo_dir(user_id: str, sketch_id: str) -> Path:
+    root = _user_path(user_id) / "projects"
+    target = (root / sketch_id).resolve()
+    if target.parent != root.resolve() or target.name != sketch_id:
+        raise HTTPException(status_code=400, detail="invalid plan source path")
+    return target
+
+
+def _remove_plan_source(user_id: str, sketch_id: str, source: DrawerPhotoCalibration | None) -> None:
+    """Best-effort removal of only this source's owned files, never a session or another plan.
+
+    Disposal of obsolete copies runs after the matching metadata commit, so a
+    filesystem error here must not turn a committed replacement into a failed
+    request: a leftover unreferenced copy is harmless, a misreported failure is
+    not. The images still committed to the plan are never among those removed.
+    """
+    if source is None:
+        return
+    try:
+        owner = _plan_photo_dir(user_id, sketch_id)
+        parents = set()
+        for url in (source.original_image_url, source.corrected_image_url):
+            if not url:
+                continue
+            path = Path(_abs(url.removeprefix("/storage/"))).resolve()
+            if path.is_relative_to(owner):
+                path.unlink(missing_ok=True)
+                parents.add(path.parent)
+        for parent in parents:
+            if parent != owner and parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+    except OSError:
+        logger.warning("could not remove an obsolete plan source for sketch %s", sketch_id, exc_info=True)
+
+
+def _calibration_from_session(
+    session_id: str,
+    user_id: str,
+    seed: Point | None = None,
+    sketch_id: str | None = None,
+) -> DrawerPhotoCalibration:
+    """Read calibration; adoption stages validated images at a new owned address.
+
+    No currently referenced file is overwritten. The caller commits the matching
+    calibration and removes the staged source on a failed metadata write.
+    """
+    user_sessions, _, _ = get_stores(user_id)
+    session = user_sessions.get(session_id)
+    if not session or not session.corrected_image_path or not session.scale_factor:
+        raise HTTPException(status_code=400, detail="calibrate the photo before using it as a plan source")
+    if not session.paper_size or not session.corners:
+        raise HTTPException(status_code=400, detail="the photo session has no paper calibration")
+    up = _user_path(user_id)
+    corrected_src = _abs(session.corrected_image_path)
+    original_src = _abs(session.original_image_path) if session.original_image_path else None
+
+    target = None
+    try:
+        if sketch_id:
+            if not original_src or not Path(original_src).is_file():
+                raise HTTPException(status_code=400, detail="the uncorrected source photo is no longer available")
+            target = _plan_photo_dir(user_id, sketch_id) / str(uuid.uuid4())
+            target.mkdir(parents=True)
+            corrected_dst = target / f"corrected{Path(corrected_src).suffix or '.jpg'}"
+            original_dst = target / f"original{Path(original_src).suffix or '.jpg'}"
+            shutil.copy2(corrected_src, corrected_dst)
+            shutil.copy2(original_src, original_dst)
+            corrected_src, original_src = str(corrected_dst), str(original_dst)
+            with Image.open(original_src) as im:
+                im.load()
+
+        with Image.open(corrected_src) as im:
+            im.load()
+            image_width, image_height = im.size
+        return DrawerPhotoCalibration(
+            session_id=session.id,
+            corrected_image_url=f"/storage/{_rel(corrected_src, up)}",
+            original_image_url=f"/storage/{_rel(original_src, up)}" if original_src else None,
+            image_width=image_width,
+            image_height=image_height,
+            paper_size=session.paper_size,
+            scale_factor=session.scale_factor,
+            corners=session.corners,
+            seed=seed,
+        )
+    except Exception:
+        if target is not None:
+            # the caller reports the original failure; a leftover staged copy is
+            # unreferenced, and rmtree must not replace that failure with its own
+            shutil.rmtree(target, ignore_errors=True)
+        raise
 
 
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif"}
@@ -977,12 +1090,13 @@ async def set_corners(request: Request, session_id: str, req: CornersRequest, us
             source_image_path=orig_path,
         )
 
-    # original upload is no longer needed for tracing; saved stations own their previews.
-    if orig_path:
+    # the original is discarded with the correction unless the caller is keeping
+    # it as a plan source (the drawer photo flow sets retain_original)
+    if not req.retain_original and orig_path:
         Path(orig_path).unlink(missing_ok=True)
-
     session.corrected_image_path = _rel(output_path, up)
-    session.original_image_path = None
+    if not req.retain_original:
+        session.original_image_path = None
     session.corners = req.corners
     session.paper_size = req.paper_size
     session.scale_factor = scale_factor
@@ -1178,6 +1292,14 @@ async def get_available_keys(user_id: str = Depends(get_user_id)):
         "google": has_cloud or has_saliency,
         "provider": tracer_kind(primary) if primary else None,
         "provider_label": TRACER_LABELS.get(primary, primary) if primary else None,
+        # the drawer photo flow is cloud-only: its effective availability and
+        # destination are the configured key's, not the primary tool tracer's
+        "drawer_cloud": bool(settings.openrouter_api_key or settings.google_api_key),
+        "drawer_provider_label": (
+            "Gemini via OpenRouter" if settings.openrouter_api_key
+            else "Gemini API" if settings.google_api_key
+            else None
+        ),
         "tracers": [
             {"id": t, "label": TRACER_LABELS.get(t, t)}
             for t in tracers
@@ -1430,6 +1552,8 @@ async def delete_session(request: Request, session_id: str, user_id: str = Depen
         session.stl_path,
     ]:
         _safe_unlink(rel)
+    # Drawer candidates generated from a session belong to that session.
+    (up / "processed" / f"{session_id}_drawer_mask.png").unlink(missing_ok=True)
 
     if session.stl_path:
         Path(_abs(session.stl_path)).with_suffix(".3mf").unlink(missing_ok=True)
@@ -1874,6 +1998,10 @@ async def delete_bin_project(request: Request, project_id: str, user_id: str = D
     project = project_store.delete(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="project not found")
+    for sketch in project.sketches:
+        owned = _plan_photo_dir(user_id, sketch.id)
+        if owned.exists():
+            shutil.rmtree(owned)
 
     remove_project_from_tools(project_id, project.tool_ids, user_tools)
     for bid, bin_data in user_bins.all().items():
@@ -1945,6 +2073,7 @@ async def create_project_sketch(
     project = project_store.get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="project not found")
+    project = project.model_copy(deep=True)
 
     name = (req.name or "").strip() or f"{DEFAULT_SKETCH_NAME} {len(project.sketches) + 1}"
     now = _now_iso()
@@ -1952,13 +2081,29 @@ async def create_project_sketch(
         name=name,
         target_grid_x=req.target_grid_x,
         target_grid_y=req.target_grid_y,
+        outline=_validated_outline(req.outline),
+        grid_alignment=req.grid_alignment or DrawerGridAlignment(),
+        fit_clearance_mm=req.fit_clearance_mm or 0,
         **req.model_dump(include={"container_width_mm", "container_depth_mm", "container_height_mm", "safety_clearance_mm"}),
         created_at=now,
         updated_at=now,
     )
+    # the plan adopts its own copy of the source, so nothing here depends on the
+    # trace session staying alive; a rejected session leaves no sketch behind
+    if req.source_session_id:
+        sketch.source = _calibration_from_session(req.source_session_id, user_id, req.source_seed, sketch.id)
+        if req.target_grid_x is None and req.target_grid_y is None:
+            # a grid covering the whole corrected frame is the starting point;
+            # aligning it to a real drawer edge is the user's next step
+            sketch.target_grid_x = min(40.0, max(1.0, math.ceil(sketch.source.image_width * sketch.source.scale_factor / 21) / 2))
+            sketch.target_grid_y = min(40.0, max(1.0, math.ceil(sketch.source.image_height * sketch.source.scale_factor / 21) / 2))
     project.sketches.append(sketch)
     project.updated_at = now
-    project_store.set(project_id, project)
+    try:
+        project_store.set(project_id, project)
+    except Exception:
+        _remove_plan_source(user_id, sketch.id, sketch.source)
+        raise
     return sketch
 
 
@@ -1976,6 +2121,7 @@ async def update_project_sketch(
         raise HTTPException(status_code=404, detail="project not found")
     project = project.model_copy(deep=True)
     sketch = get_sketch(project, sketch_id)
+    previous_source = sketch.source
     _, _, user_bins = get_stores(user_id)
 
     name = None
@@ -1987,6 +2133,15 @@ async def update_project_sketch(
     if "bin_layout" in req.model_fields_set:
         moved = transform_moved_stacks(sketch.bin_layout, req.bin_layout or [])
         layout = validate_bin_layout(project, moved, user_bins)
+    # validate every replacement before mutating the copy so a rejected update
+    # leaves the saved plan exactly as it was
+    outline = _validated_outline(req.outline) if "outline" in req.model_fields_set else sketch.outline
+    if req.source_session_id:
+        source = _calibration_from_session(req.source_session_id, user_id, req.source_seed, sketch.id)
+    elif req.source_seed is not None and sketch.source is not None:
+        source = sketch.source.model_copy(update={"seed": req.source_seed})
+    else:
+        source = sketch.source
 
     if name is not None:
         sketch.name = name
@@ -1999,11 +2154,137 @@ async def update_project_sketch(
             setattr(sketch, field, getattr(req, field))
     if layout is not None:
         sketch.bin_layout = layout
+    sketch.outline = outline
+    sketch.source = source
+    if "grid_alignment" in req.model_fields_set:
+        sketch.grid_alignment = req.grid_alignment or DrawerGridAlignment()
+    if "fit_clearance_mm" in req.model_fields_set:
+        sketch.fit_clearance_mm = req.fit_clearance_mm or 0
 
     sketch.updated_at = _now_iso()
     project.updated_at = sketch.updated_at
-    project_store.set(project_id, project)
+    try:
+        project_store.set(project_id, project)
+    except Exception:
+        if req.source_session_id:
+            _remove_plan_source(user_id, sketch.id, source)
+        raise
+    if req.source_session_id:
+        _remove_plan_source(user_id, sketch.id, previous_source)
     return sketch
+
+
+@router.post(
+    "/bin-projects/{project_id}/sketches/outline/candidate",
+    response_model=DrawerOutlineCandidateResponse,
+)
+async def propose_drawer_outline(
+    request: Request,
+    project_id: str,
+    req: DrawerOutlineCandidateRequest,
+    user_id: str = Depends(get_user_id),
+):
+    """Ask Gemini (through the existing tracer adapter) for the interior floor.
+
+    Candidates can be reviewed before any plan exists; only explicit acceptance
+    persists the outline. Seed containment rejects disconnected regions, not an
+    enclosing exterior: semantic floor correctness still needs user review.
+    """
+    project = get_project_store(user_id).get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+    if req.sketch_id:
+        # a saved plan owns its adopted source, so boundary work needs no live session
+        sketch = get_sketch(project, req.sketch_id)
+        if sketch.source is None:
+            raise HTTPException(status_code=400, detail="this drawer plan has no source photo")
+        calibration = sketch.source
+    elif req.session_id:
+        calibration = _calibration_from_session(req.session_id, user_id)
+    else:
+        raise HTTPException(status_code=400, detail="a drawer plan or a calibrated photo is required")
+
+    tracer_id = req.tracer or "gemini"
+    if tracer_kind(tracer_id) != "gemini":
+        raise HTTPException(status_code=400, detail="the photo candidate needs the Gemini provider; trace the boundary locally instead")
+    if not settings.google_api_key and not settings.openrouter_api_key:
+        raise HTTPException(status_code=400, detail="no Gemini or OpenRouter API key is configured; trace the boundary locally instead")
+    api_key = settings.google_api_key or req.api_key
+    if not api_key and not settings.openrouter_api_key:
+        raise HTTPException(status_code=400, detail="no api key provided")
+
+    user_sessions, _, _ = get_stores(user_id)
+    up = _user_path(user_id)
+    corrected_image_path = _abs(calibration.corrected_image_url.removeprefix("/storage/"))
+    if not corrected_image_path or not Path(corrected_image_path).exists():
+        raise HTTPException(status_code=400, detail="the source photo is no longer available; trace the boundary locally")
+    # A saved-source candidate belongs to its plan; a pending-source candidate
+    # belongs to its session. Neither mask is part of the adopted source.
+    mask_output_path = str(
+        _plan_photo_dir(user_id, req.sketch_id) / "drawer_mask.png"
+        if req.sketch_id else up / "processed" / f"{calibration.session_id}_drawer_mask.png"
+    )
+    tracer = _get_tracer(tracer_id)
+
+    def ensure_candidate_owner():
+        user_sessions.ensure_open()
+        if req.sketch_id:
+            current = get_project_store(user_id).get(project_id)
+            current_sketch = next((s for s in current.sketches if s.id == req.sketch_id), None) if current else None
+            if current_sketch is None or current_sketch.source != calibration:
+                raise ValueError("the saved source changed while tracing; generate from its current photo")
+        elif user_sessions.get(req.session_id) is None:
+            raise ValueError("the photo session was deleted while tracing")
+
+    try:
+        polygon, mask_path = await tracer.trace_drawer_floor(
+            corrected_image_path,
+            api_key,
+            mask_output_path,
+            before_mask_write=ensure_candidate_owner,
+            # The adapter communicates this floor point in provider-input coordinates.
+            focus=(req.seed.x, req.seed.y),
+        )
+    except StoreClosedError:
+        raise
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="Gemini timed out; the model may be overloaded. Try again shortly.")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        error_msg = str(e)
+        if "insufficient_quota" in error_msg or "exceeded" in error_msg.lower():
+            raise HTTPException(status_code=402, detail="API quota exceeded - check your billing")
+        if "invalid_api_key" in error_msg or "Incorrect API key" in error_msg:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        if "rate_limit" in error_msg.lower():
+            raise HTTPException(status_code=429, detail="Rate limited - try again shortly")
+        logging.error("drawer floor tracing failed: %s", error_msg[:500], exc_info=True)
+        raise HTTPException(status_code=500, detail=f"AI tracing failed ({type(e).__name__}: {error_msg[:200]})")
+
+    if polygon is None:
+        raise HTTPException(status_code=400, detail="no interior floor found; select the floor again or trace the boundary locally")
+
+    floor_outer = ring_from_points(polygon.points)
+    floor_holes = [ring_from_points(ring) for ring in polygon.interior_rings]
+    if not point_in_polygon((req.seed.x, req.seed.y), floor_outer, floor_holes):
+        raise HTTPException(status_code=400, detail="the generated boundary does not include the floor you selected; try again or trace the boundary locally")
+
+    scale = calibration.scale_factor
+    outline = _validated_outline(DrawerOutline(
+        points=[Point(x=p.x * scale, y=p.y * scale) for p in polygon.points],
+        interior_rings=[[Point(x=p.x * scale, y=p.y * scale) for p in ring] for ring in polygon.interior_rings],
+    ))
+
+    mask_url = None
+    if mask_path:
+        mask_url = f"/storage/{_rel(mask_path, up)}"
+    return DrawerOutlineCandidateResponse(
+        outline=outline,
+        mask_url=mask_url,
+        image_width=calibration.image_width,
+        image_height=calibration.image_height,
+    )
 
 
 @router.post("/bin-projects/{project_id}/sketches/{sketch_id}/placements/{placement_id}/stack-action", response_model=ProjectSketch)
@@ -2093,8 +2374,16 @@ def assess_project_sketch(
         raise HTTPException(status_code=404, detail="project not found")
     sketch = get_sketch(project, sketch_id).model_copy(deep=True)
     _, user_tools, user_bins = get_stores(user_id)
-    for field, value in req.model_dump(exclude_unset=True, exclude={"bin_layout"}).items():
+    for field, value in req.model_dump(exclude_unset=True, exclude={
+        "bin_layout", "outline", "grid_alignment", "fit_clearance_mm", "source_session_id", "source_seed",
+    }).items():
         setattr(sketch, field, value)
+    if "outline" in req.model_fields_set:
+        sketch.outline = _validated_outline(req.outline)
+    if "grid_alignment" in req.model_fields_set:
+        sketch.grid_alignment = req.grid_alignment or DrawerGridAlignment()
+    if "fit_clearance_mm" in req.model_fields_set:
+        sketch.fit_clearance_mm = req.fit_clearance_mm or 0
     if "bin_layout" in req.model_fields_set:
         sketch.bin_layout = validate_bin_layout(project, req.bin_layout or [], user_bins)
     else:
@@ -2134,11 +2423,15 @@ async def delete_project_sketch(
     project = project_store.get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="project not found")
+    project = project.model_copy(deep=True)
     get_sketch(project, sketch_id)
 
     project.sketches = [sketch for sketch in project.sketches if sketch.id != sketch_id]
     project.updated_at = _now_iso()
     project_store.set(project_id, project)
+    owned = _plan_photo_dir(user_id, sketch_id)
+    if owned.exists():
+        shutil.rmtree(owned)
     return StatusResponse(status="deleted")
 
 

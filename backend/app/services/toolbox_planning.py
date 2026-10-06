@@ -7,6 +7,14 @@ from copy import copy, deepcopy
 
 from app.models.schemas import BinPreviewTool, BinSummary, GenerateRequest
 from app.services.bin_service import sync_placed_tools
+from app.services.drawer_outline import (
+    footprint_corners,
+    polygon_area,
+    ring_from_points,
+    rotate_point,
+    shape_inside,
+    validate_outline,
+)
 from app.services.pocket_depths import (
     automatic_required_depth_mm,
     mating_increment_mm,
@@ -323,6 +331,25 @@ def assess_plan(project, sketch, user_bins, user_tools):
     gx = math.floor(width / 21) / 2 if sketch.container_width_mm is not None else sketch.target_grid_x
     gy = math.floor(depth / 21) / 2 if sketch.container_depth_mm is not None else sketch.target_grid_y
     by_id = {p.id: p for p in sketch.bin_layout}
+
+    # A stored outline decides both containment and scan bounds. A boundary that
+    # fails validation cannot arrive through the API; fall back and report it.
+    outline_outer, outline_holes = None, []
+    outline_invalid = False
+    if sketch.outline is not None:
+        candidate_outer = ring_from_points(sketch.outline.points)
+        candidate_holes = [ring_from_points(ring) for ring in sketch.outline.interior_rings]
+        try:
+            validate_outline(candidate_outer, candidate_holes)
+        except ValueError:
+            candidate_outer, candidate_holes = None, []
+            outline_invalid = True
+        outline_outer, outline_holes = candidate_outer, candidate_holes
+    origin_x = sketch.grid_alignment.origin_x_mm
+    origin_y = sketch.grid_alignment.origin_y_mm
+    grid_rotation = sketch.grid_alignment.rotation_deg
+    fit_clearance = sketch.fit_clearance_mm
+
     bin_assessments = {}
     for p in sketch.bin_layout:
         if p.bin_id not in bins:
@@ -342,6 +369,8 @@ def assess_plan(project, sketch, user_bins, user_tools):
     missing, housed = set(), set()
     if width is None or depth is None or sketch.container_height_mm is None:
         unresolved.append("Usable container width, depth or height is unknown")
+    if outline_invalid:
+        unresolved.append("A saved drawer boundary is not a valid polygon; the plan fell back to the rectangular container bounds")
 
     def elevation(p):
         if p.id in elevations:
@@ -392,7 +421,13 @@ def assess_plan(project, sketch, user_bins, user_tools):
         missing.update(assessment["missing_tool_ids"])
         housed.update(pt.tool_id for pt in bin_data.placed_tools)
         w, h = footprint(p, config)
-        if width is not None and (p.x+w)*42 > width+1e-7 or depth is not None and (p.y+h)*42 > depth+1e-7:
+        if outline_outer is not None:
+            corners = footprint_corners(
+                (origin_x, origin_y), grid_rotation, p.x, p.y, w, h,
+            )
+            if not shape_inside(corners, outline_outer, outline_holes, fit_clearance):
+                violations.append({"code": "boundary", "placement_id": p.id, "message": "Bin footprint is not covered by the measured drawer floor inside the fit clearance"})
+        elif p.x < 0 or p.y < 0 or (width is not None and (p.x+w)*42 > width+1e-7) or (depth is not None and (p.y+h)*42 > depth+1e-7):
             violations.append({"code": "boundary", "placement_id": p.id, "message": "Bin footprint exceeds the usable container bounds"})
         compatible = None
         if p.support_id:
@@ -464,10 +499,26 @@ def assess_plan(project, sketch, user_bins, user_tools):
                 violations.append({"code": "overlap", "placement_id": a.id, "other_placement_id": b.id, "message": "Independent stack footprints collide"})
     floor = [(p, w, h) for p, w, h in rectangles if not p.support_id]
     free_cells, occupied = [], 0
-    if gx is not None and gy is not None:
-        for iy in range(int(gy*2)):
-            for ix in range(int(gx*2)):
+    usable_cells = 0
+    if outline_outer is not None:
+        local = [rotate_point((x - origin_x, y - origin_y), -math.radians(grid_rotation)) for x, y in outline_outer]
+        ix0 = math.floor(min(x for x, _ in local) / 21 + 1e-9)
+        iy0 = math.floor(min(y for _, y in local) / 21 + 1e-9)
+        ix1 = math.ceil(max(x for x, _ in local) / 21 - 1e-9)
+        iy1 = math.ceil(max(y for _, y in local) / 21 - 1e-9)
+    else:
+        ix0, iy0 = 0, 0
+        ix1, iy1 = int((gx or 0) * 2), int((gy or 0) * 2)
+    if outline_outer is not None or gx is not None and gy is not None:
+        for iy in range(iy0, iy1):
+            for ix in range(ix0, ix1):
                 x, y = ix/2, iy/2
+                if outline_outer is not None and not shape_inside(
+                    footprint_corners((origin_x, origin_y), grid_rotation, x, y, 0.5, 0.5),
+                    outline_outer, outline_holes, fit_clearance,
+                ):
+                    continue
+                usable_cells += 1
                 if any(x < p.x+w and p.x < x+.5 and y < p.y+h and p.y < y+.5 for p, w, h in floor):
                     occupied += .25
                 else:
@@ -511,7 +562,11 @@ def assess_plan(project, sketch, user_bins, user_tools):
             "unhoused_tool_ids": unhoused, "placements": results,
             "grid_x": gx, "grid_y": gy, "width_mm": width, "depth_mm": depth,
             "height_mm": sketch.container_height_mm, "safety_clearance_mm": sketch.safety_clearance_mm,
-            "residual_width_mm": None if width is None or gx is None else width-gx*42,
-            "residual_depth_mm": None if depth is None or gy is None else depth-gy*42,
+            "residual_width_mm": None if outline_outer is not None or width is None or gx is None else width-gx*42,
+            "residual_depth_mm": None if outline_outer is not None or depth is None or gy is None else depth-gy*42,
             "occupied_floor_units": occupied, "free_cells": free_cells, "free_regions": regions,
+            "usable_area_units": usable_cells * .25,
+            "floor_area_units": None if outline_outer is None else round(polygon_area(outline_outer, outline_holes) / (42 * 42), 4),
+            "grid_origin_mm": {"x": origin_x, "y": origin_y},
+            "fit_clearance_mm": fit_clearance,
             "stacks": [{"root_id": p.id, "headroom_mm": min((r["headroom_mm"] for r in results if r["root_id"] == p.id and r["headroom_mm"] is not None), default=None)} for p,_,_ in floor]}

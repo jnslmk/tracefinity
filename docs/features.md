@@ -135,6 +135,23 @@ Reference for AI agents. Check here before suggesting new features or claiming s
 - Overlap and out-of-drawer warnings
 - Height layer slider: show every bin base elevation, or one assessed level in millimetres and units; bins spanning a level stay visible
 
+## Drawer plans from a photo
+
+- Create a plan from a photo of an open drawer, alongside the rectangular create; the photo is calibrated with the same upload, EXIF ingest, paper corner detection/editing, size presets and photo warnings as tool tracing
+- Full-frame metric correction: the paper sets the scale, so the boundary can extend beyond the sheet
+- Positively select the interior floor on the corrected photo, then either get a candidate boundary from the configured provider (Gemini through OpenRouter or the Google API) or trace it locally with no key
+- The provider proposal is an editable starting point, not a verdict: it can follow the case walls, rim or exterior instead of the interior floor. Inspect it, correct the vertices and exclusions, or trace locally over the same calibrated photo
+- The provider request sends the photo off-installation; the UI states the destination and that retention belongs to the provider
+- Review the boundary and its obstruction exclusions over the corrected photo: add, remove and drag vertices, add exclusion rings, zoom and pan, undo and redo, with extent, area and perimeter shown
+- Explicit acceptance before any plan is created/updated; generation, local tracing and recalibration never change the saved plan
+- Persisted per plan: metric outline/exclusions, owned normalized uncorrected original and corrected photo, scale, paper corners/size and selected floor point, grid frame, and Euclidean minimum-distance container-fit clearance
+- Reopen the saved original for recalibration or replace it with a new photo; trace that pending frame before Accept, without depending on the deleted historical session. Cancel/failure keeps the old source and outline usable
+- Plan/project deletion removes only its owned photos and candidate masks; session-scoped masks are cleaned on session deletion, without changing ordinary Tool source retention
+- Align the grid to a straight drawer edge that is not parallel to the reference paper: turn the grid and anchor it, independent of the paper's angle, and toggle the source photo underlay in the 2D view; the photo is anchored in drawer millimetres, so turning the grid never moves it
+- The boundary, not a rectangle, decides: 2D/3D floor/grid, warnings, backend assessment, auto-arrange/free spots and stats cover the actual floor in the aligned frame, including negative cells; the old rectangle does not limit usable capacity
+- A provider proposal containing the selected point is not guaranteed to be floor: it can include the case walls, rim or exterior. Review and correct it before Accept, or trace the boundary locally. The photo-derived physical fit remains unverified either way; concavities/exclusions are authoritative, not the bounding box
+- No shaped perimeter bins, fillers, outline imports or printable floor/baseplate output in this workflow
+
 ## Tool Library
 
 - Search by name

@@ -26,6 +26,9 @@ import type {
   PlacedTool,
   TextLabel,
   PaperSize,
+  DrawerOutline,
+  DrawerGridAlignment,
+  DrawerOutlineCandidate,
   AuthStatus,
   Account,
   LoginResult,
@@ -130,10 +133,11 @@ export async function setCorners(
   sessionId: string,
   corners: Point[],
   paperSize: PaperSize,
+  retainOriginal = false,
 ): Promise<CornersResponse> {
   return fetchApi(`/api/sessions/${sessionId}/corners`, {
     method: 'POST',
-    body: JSON.stringify({ corners, paper_size: paperSize }),
+    body: JSON.stringify({ corners, paper_size: paperSize, retain_original: retainOriginal }),
   })
 }
 
@@ -146,6 +150,8 @@ export async function getAvailableKeys(): Promise<{
   google: boolean
   provider: string | null
   provider_label: string | null
+  drawer_cloud: boolean
+  drawer_provider_label: string | null
   tracers: TracerInfo[]
   photo_stations: boolean
 }> {
@@ -363,11 +369,45 @@ export async function updateProject(
 
 export async function createProjectSketch(
   projectId: string,
-  sketch: { name?: string; target_grid_x?: number | null; target_grid_y?: number | null } & ContainerLimits = {},
+  sketch: {
+    name?: string
+    target_grid_x?: number | null
+    target_grid_y?: number | null
+    outline?: DrawerOutline | null
+    grid_alignment?: DrawerGridAlignment
+    fit_clearance_mm?: number
+    source_session_id?: string
+    source_seed?: Point
+  } & ContainerLimits = {},
 ): Promise<ProjectSketch> {
   return fetchApi(`/api/bin-projects/${projectId}/sketches`, {
     method: 'POST',
     body: JSON.stringify(sketch),
+  })
+}
+
+/**
+ * Ask Gemini (through the configured provider) for the interior floor boundary
+ * around a floor point the user selected, in corrected-image pixels. Only explicit
+ * acceptance persists a plan. `sketchId` targets its unchanged owned source;
+ * `sessionId` targets a pending new photo or recalibration, including replacements.
+ */
+export async function proposeDrawerOutline(
+  projectId: string,
+  target: { sketchId?: string; sessionId?: string },
+  seed: Point,
+  opts: { tracer?: string; apiKey?: string } = {},
+): Promise<DrawerOutlineCandidate> {
+  return fetchApi(`/api/bin-projects/${projectId}/sketches/outline/candidate`, {
+    method: 'POST',
+    body: JSON.stringify({
+      seed,
+      sketch_id: target.sketchId ?? null,
+      session_id: target.sessionId ?? null,
+      provider: 'google',
+      api_key: opts.apiKey ?? null,
+      tracer: opts.tracer ?? null,
+    }),
   })
 }
 
@@ -379,6 +419,11 @@ export async function updateProjectSketch(
     target_grid_x?: number | null
     target_grid_y?: number | null
     bin_layout?: ProjectBinPlacement[]
+    outline?: DrawerOutline | null
+    grid_alignment?: DrawerGridAlignment
+    fit_clearance_mm?: number
+    source_session_id?: string
+    source_seed?: Point
   } & ContainerLimits,
 ): Promise<ProjectSketch> {
   return fetchApi(`/api/bin-projects/${projectId}/sketches/${sketchId}`, {

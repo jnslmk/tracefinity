@@ -1,5 +1,7 @@
-import type { BinSummary, Point, ProjectBinPlacement } from '@/types'
+import type { BinSummary, DrawerOutline, Point, ProjectBinPlacement } from '@/types'
 import { GRID_UNIT } from '@/lib/constants'
+import { footprintCorners, outlineBounds, shapeInsideOutline, toGridLocal } from '@/lib/drawerOutline'
+import type { Rect } from '@/lib/drawerOutline'
 
 // drawer plans live in gridfinity units; a bin snaps to half units exactly when
 // its own base is a half grid, otherwise to full units
@@ -47,7 +49,7 @@ export interface UnitRect {
 }
 
 export function snapUnits(value: number, snap: number = FULL_GRID_SNAP): number {
-  return Math.round(value / snap) * snap
+  return Math.round(value / snap) * snap + 0
 }
 
 export function clampDrawerGrid(value: number): number {
@@ -93,11 +95,65 @@ export function rectFitsDrawer(rect: UnitRect, drawerX: number, drawerY: number)
   return rect.x >= 0 && rect.y >= 0 && rect.x + rect.w <= drawerX && rect.y + rect.h <= drawerY
 }
 
-/** Keep a placement inside the drawer when the bin still fits at all. */
-export function clampToDrawer(rect: UnitRect, drawerX: number, drawerY: number, snap = HALF_GRID_SNAP): { x: number; y: number } {
+/**
+ * A photo-derived floor boundary plus the grid frame it sits in. Absent means
+ * a rectangular plan, where the drawer extents are the only containment rule.
+ * The frame turns with `rotationDeg`, so a drawn footprint is a rotated
+ * rectangle and is tested as one.
+ */
+export interface DrawerFootprint {
+  outline: DrawerOutline | null
+  originXmm: number
+  originYmm: number
+  rotationDeg: number
+  fitClearanceMm: number
+}
+
+/** Scan/render bounds in grid units, independent of the legacy display size. */
+export function drawerGridBounds(drawerX: number, drawerY: number, footprint?: DrawerFootprint | null): Rect {
+  if (!footprint?.outline) return { x0: 0, y0: 0, x1: drawerX, y1: drawerY }
+  const origin = { x: footprint.originXmm, y: footprint.originYmm }
+  const bounds = outlineBounds({
+    points: footprint.outline.points.map(point => toGridLocal(point, origin, footprint.rotationDeg)),
+    interior_rings: [],
+  })
   return {
-    x: Math.max(0, Math.min(rect.x, Math.floor((drawerX - rect.w) / snap) * snap)),
-    y: Math.max(0, Math.min(rect.y, Math.floor((drawerY - rect.h) / snap) * snap)),
+    x0: bounds.x0 / GRID_UNIT, y0: bounds.y0 / GRID_UNIT,
+    x1: bounds.x1 / GRID_UNIT, y1: bounds.y1 / GRID_UNIT,
+  }
+}
+
+/** True when the footprint clears the boundary's concavities, holes and fit clearance. */
+export function rectFitsFootprint(
+  rect: UnitRect,
+  drawerX: number,
+  drawerY: number,
+  footprint?: DrawerFootprint | null,
+): boolean {
+  // A photo boundary is authoritative; the legacy rectangle is not a fit limit.
+  if (footprint?.outline) {
+    const corners = footprintCorners(
+      { x: footprint.originXmm, y: footprint.originYmm },
+      footprint.rotationDeg,
+      rect.x,
+      rect.y,
+      rect.w,
+      rect.h,
+    )
+    return shapeInsideOutline(corners, footprint.outline, footprint.fitClearanceMm)
+  }
+  return rectFitsDrawer(rect, drawerX, drawerY)
+}
+
+/** Clamp to the floor's grid-frame bounds; containment still reports notches/holes. */
+export function clampToDrawer(
+  rect: UnitRect, drawerX: number, drawerY: number, snap = HALF_GRID_SNAP,
+  footprint?: DrawerFootprint | null,
+): { x: number; y: number } {
+  const bounds = drawerGridBounds(drawerX, drawerY, footprint)
+  return {
+    x: Math.max(Math.ceil((bounds.x0 - 1e-9) / snap) * snap, Math.min(rect.x, Math.floor((bounds.x1 - rect.w + 1e-9) / snap) * snap)) + 0,
+    y: Math.max(Math.ceil((bounds.y0 - 1e-9) / snap) * snap, Math.min(rect.y, Math.floor((bounds.y1 - rect.h + 1e-9) / snap) * snap)) + 0,
   }
 }
 
@@ -151,15 +207,15 @@ export function rotationOffsetMm(
   }
 }
 
-/** Unit positions for drawer grid lines, including the trailing partial unit. */
-export function gridLines(units: number): number[] {
+/** Grid-line positions across a grid-frame interval, including partial edges. */
+export function gridLines(units: number, start = 0): number[] {
   const lines: number[] = []
   const step = 0.5
-  for (let i = 0; i <= Math.floor(units / step); i++) {
-    const pos = i * step
-    if (pos <= units) lines.push(pos)
+  for (let i = Math.ceil((start - 1e-9) / step); i <= Math.floor((units + 1e-9) / step); i++) {
+    lines.push(i * step + 0)
   }
-  if (!Number.isInteger(units) && !lines.includes(units)) lines.push(units)
+  if (!lines.includes(start)) lines.unshift(start + 0)
+  if (!lines.includes(units)) lines.push(units + 0)
   return lines
 }
 
@@ -202,6 +258,7 @@ export function findLayoutConflicts(
   bins: Map<string, BinSummary>,
   drawerX: number,
   drawerY: number,
+  footprint?: DrawerFootprint | null,
 ): { overlapping: Set<string>; outOfBounds: Set<string> } {
   const overlapping = new Set<string>()
   const outOfBounds = new Set<string>()
@@ -211,7 +268,7 @@ export function findLayoutConflicts(
     const bin = bins.get(placement.bin_id)
     if (!bin) continue
     const rect = placementRect(placement, bin)
-    if (!rectFitsDrawer(rect, drawerX, drawerY)) outOfBounds.add(placement.id)
+    if (!rectFitsFootprint(rect, drawerX, drawerY, footprint)) outOfBounds.add(placement.id)
     rects.push({ id: placement.id, rect })
   }
 
@@ -236,18 +293,20 @@ export function findFreeSpot(
   occupied: UnitRect[],
   drawerX: number,
   drawerY: number,
-  options: { rotation?: number } = {},
+  options: { rotation?: number; footprint?: DrawerFootprint | null } = {},
 ): { x: number; y: number; rotation: PlacementRotation } | null {
   const snap = snapForBin(bin)
   const preferred = normalizeRotation(options.rotation)
   const rotations: PlacementRotation[] = [preferred, nextRotation(preferred)]
+  const bounds = drawerGridBounds(drawerX, drawerY, options.footprint)
 
   for (const rotation of rotations) {
     const { w, h } = binFootprint(bin, rotation)
-    if (w > drawerX || h > drawerY) continue
-    for (let y = 0; y <= drawerY - h + 1e-9; y += snap) {
-      for (let x = 0; x <= drawerX - w + 1e-9; x += snap) {
+    if (w > bounds.x1 - bounds.x0 + 1e-9 || h > bounds.y1 - bounds.y0 + 1e-9) continue
+    for (let y = Math.ceil((bounds.y0 - 1e-9) / snap) * snap; y <= bounds.y1 - h + 1e-9; y += snap) {
+      for (let x = Math.ceil((bounds.x0 - 1e-9) / snap) * snap; x <= bounds.x1 - w + 1e-9; x += snap) {
         const rect = { x: snapUnits(x, snap), y: snapUnits(y, snap), w, h }
+        if (!rectFitsFootprint(rect, drawerX, drawerY, options.footprint)) continue
         if (!occupied.some(other => rectsOverlap(rect, other))) {
           return { x: rect.x, y: rect.y, rotation }
         }
@@ -271,6 +330,7 @@ export function autoArrange(
   bins: Map<string, BinSummary>,
   drawerX: number,
   drawerY: number,
+  footprint?: DrawerFootprint | null,
 ): { placements: ProjectBinPlacement[]; unfittedIds: string[] } {
   const stackMembers = new Set(placements.filter(p => p.support_id).flatMap(p => [p.id, p.support_id!]))
   const preserved = placements.filter(p => stackMembers.has(p.id))
@@ -293,7 +353,7 @@ export function autoArrange(
 
   for (const placement of ordered) {
     const bin = bins.get(placement.bin_id)!
-    const spot = findFreeSpot(bin, occupied, drawerX, drawerY, { rotation: placement.rotation })
+    const spot = findFreeSpot(bin, occupied, drawerX, drawerY, { rotation: placement.rotation, footprint })
     if (!spot) {
       unfitted.push(placement)
       continue
@@ -327,20 +387,33 @@ export function drawerStats(
   bins: BinSummary[],
   drawerX: number,
   drawerY: number,
+  footprint?: DrawerFootprint | null,
 ): DrawerStats {
   const byId = binById(bins)
   const known = placements.filter(placement => byId.has(placement.bin_id))
   const placedBinIds = new Set(known.map(placement => placement.bin_id))
   const roots = known.filter(p => !p.support_id).map(p => placementRect(p, byId.get(p.bin_id)!))
   let usedUnits = 0
-  for (let y = 0; y < drawerY; y += .5) {
-    for (let x = 0; x < drawerX; x += .5) {
-      if (roots.some(rect => rectsOverlap(rect, { x, y, w: Math.min(.5, drawerX-x), h: Math.min(.5, drawerY-y) }))) {
-        usedUnits += Math.min(.5, drawerX-x) * Math.min(.5, drawerY-y)
+  let drawerUnits = 0
+  const bounds = drawerGridBounds(drawerX, drawerY, footprint)
+  const x0 = footprint?.outline ? Math.floor((bounds.x0 + 1e-9) * 2) / 2 : 0
+  const y0 = footprint?.outline ? Math.floor((bounds.y0 + 1e-9) * 2) / 2 : 0
+  for (let y = y0; y < bounds.y1 - 1e-9; y += .5) {
+    for (let x = x0; x < bounds.x1 - 1e-9; x += .5) {
+      const w = footprint?.outline ? .5 : Math.min(.5, bounds.x1 - x)
+      const h = footprint?.outline ? .5 : Math.min(.5, bounds.y1 - y)
+      if (footprint?.outline) {
+        // only floor the boundary actually covers is available or occupied
+        const corners = footprintCorners(
+          { x: footprint.originXmm, y: footprint.originYmm },
+          footprint.rotationDeg, x, y, w, h,
+        )
+        if (!shapeInsideOutline(corners, footprint.outline, footprint.fitClearanceMm)) continue
       }
+      drawerUnits += w * h
+      if (roots.some(rect => rectsOverlap(rect, { x, y, w, h }))) usedUnits += w * h
     }
   }
-  const drawerUnits = drawerX * drawerY
 
   return {
     drawerUnits,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { BinSummary, ProjectBinPlacement } from '@/types'
+import type { BinSummary, DrawerOutline, ProjectBinPlacement } from '@/types'
 import { GRID_UNIT } from '@/lib/constants'
+import { rotatePoint } from '@/lib/drawerOutline'
 import {
   HALF_GRID_SNAP,
   autoArrange,
@@ -10,10 +11,13 @@ import {
   clampDrawerGrid,
   clampToDrawer,
   drawerStats,
+  drawerGridBounds,
   findFreeSpot,
   findLayoutConflicts,
   nextRotation,
+  gridLines,
   placementRect,
+  rectFitsFootprint,
   rectsOverlap,
   rotationOffsetMm,
   snapForBin,
@@ -51,6 +55,17 @@ describe('snapping and clamping', () => {
   it('snaps to half units when asked', () => {
     expect(snapUnits(1.3, HALF_GRID_SNAP)).toBe(1.5)
     expect(snapUnits(1.1, HALF_GRID_SNAP)).toBe(1)
+  })
+
+  it('canonicalizes zero in snapped, clamped and rendered coordinates without losing negative cells', () => {
+    expect(snapUnits(-0)).toBe(0)
+    expect(snapUnits(-.1)).toBe(0)
+    expect(snapUnits(-.1, HALF_GRID_SNAP)).toBe(0)
+    expect(snapUnits(-1.1)).toBe(-1)
+    expect(snapUnits(-.6, HALF_GRID_SNAP)).toBe(-.5)
+    expect(clampToDrawer({ x: -0, y: -1, w: 1, h: 1 }, 2, 2)).toEqual({ x: 0, y: 0 })
+    expect(gridLines(1)).toEqual([0, .5, 1])
+    expect(gridLines(-0, -1)).toEqual([-1, -.5, 0])
   })
 
   it('takes the snap step from the bin base', () => {
@@ -343,3 +358,135 @@ describe('supported stacks', () => {
     expect(findFreeSpot(bin('large', 2.5, 1), [], 100 / 42, 2)).toBeNull()
   })
 })
+
+describe('photo-derived boundary', () => {
+  const outline = (points: [number, number][], interiorRings: [number, number][][] = []): DrawerOutline => ({
+    points: points.map(([x, y]) => ({ x, y })),
+    interior_rings: interiorRings.map(ring => ring.map(([x, y]) => ({ x, y }))),
+  })
+  const fp = (outlineValue: DrawerOutline, fitClearanceMm = 0, rotationDeg = 0) => ({
+    outline: outlineValue,
+    originXmm: 0,
+    originYmm: 0,
+    rotationDeg,
+    fitClearanceMm,
+  })
+
+  // the boundary sits just outside a 2x2 grid; the obstruction lies over cell (1,1)
+  const withHole = outline([[-5, -5], [89, -5], [89, 89], [-5, 89]], [[[50, 50], [60, 50], [60, 60], [50, 60]]])
+  // a thin slit cut in from the bottom edge, between the two bottom cells' corners
+  const slit = outline([[-5, -5], [89, -5], [89, 89], [60, 89], [60, 40], [52, 40], [52, 89], [-5, 89]])
+  const frame = outline([[-5, -5], [89, -5], [89, 89], [-5, 89]])
+
+  it('rejects a footprint over a concavity even though every corner is inside', () => {
+    expect(rectFitsFootprint({ x: 0, y: 0, w: 1, h: 1 }, 2, 2, fp(slit))).toBe(true)
+    expect(rectFitsFootprint({ x: 1, y: 1, w: 1, h: 1 }, 2, 2, fp(slit))).toBe(false)
+  })
+
+  it('rejects a footprint covering an interior exclusion', () => {
+    expect(rectFitsFootprint({ x: 0, y: 0, w: 1, h: 1 }, 2, 2, fp(withHole))).toBe(true)
+    expect(rectFitsFootprint({ x: 1, y: 1, w: 1, h: 1 }, 2, 2, fp(withHole))).toBe(false)
+  })
+
+  it('keeps the fit clearance out of the boundary', () => {
+    expect(rectFitsFootprint({ x: 0, y: 0, w: 1, h: 1 }, 2, 2, fp(frame, 0))).toBe(true)
+    expect(rectFitsFootprint({ x: 0, y: 0, w: 1, h: 1 }, 2, 2, fp(frame, 3))).toBe(true)
+    expect(rectFitsFootprint({ x: 0, y: 0, w: 1, h: 1 }, 2, 2, fp(frame, 10))).toBe(false)
+  })
+
+  it('flags placements outside the boundary as out of bounds', () => {
+    const bins = binById([bin('a', 1, 1)])
+    const { outOfBounds } = findLayoutConflicts(
+      [placement('a', 0, 0, 0, 'inside'), placement('a', 1, 1, 0, 'obstructed')],
+      bins, 2, 2, fp(withHole),
+    )
+
+    expect(outOfBounds).toEqual(new Set(['obstructed']))
+  })
+
+  it('never lets automatic packing choose a spot outside the boundary', () => {
+    const bins = binById([bin('a', 1, 1)])
+    const occupied = [{ x: 0, y: 0, w: 1, h: 1 }, { x: 1, y: 0, w: 1, h: 1 }, { x: 0, y: 1, w: 1, h: 1 }]
+
+    // the rectangle-only rule would happily pick the obstructed corner
+    expect(findFreeSpot(bin('a', 1, 1), occupied, 2, 2)).toEqual({ x: 1, y: 1, rotation: 0 })
+    expect(findFreeSpot(bin('a', 1, 1), occupied, 2, 2, { footprint: fp(withHole) })).toBeNull()
+
+    const result = autoArrange([
+      placement('a', 0, 0, 0, 'p1'), placement('a', 0, 0, 0, 'p2'),
+      placement('a', 0, 0, 0, 'p3'), placement('a', 0, 0, 0, 'p4'),
+    ], bins, 2, 2, fp(withHole))
+
+    expect(result.placements).toHaveLength(4)
+    expect(result.unfittedIds).toHaveLength(1)
+    for (const placed of result.placements) {
+      if (result.unfittedIds.includes(placed.id)) continue
+      expect(rectFitsFootprint(placementRect(placed, bins.get('a')!), 2, 2, fp(withHole))).toBe(true)
+    }
+  })
+
+  it('measures available floor from the boundary, not the rectangle', () => {
+    const stats = drawerStats([placement('a', 0, 0, 0, 'p1')], [bin('a', 1, 1)], 2, 2, fp(withHole))
+
+    // 16 half-cells in the 2x2 grid; the 10x10mm hole sits inside cell (1,1) only,
+    // whose four corners bracket it, so 15 cells x 0.25 = 3.75 units of floor
+    expect(stats.drawerUnits).toBe(3.75)
+    expect(stats.usedUnits).toBe(1)
+  })
+
+  it('turns the footprint with the grid so a drawer edge off the paper axes still fits', () => {
+    // a 90x45mm floor turned exactly 30 degrees: only the grid sharing that turn
+    // fits a 2x1 bin whose corner and edges land on the floor's own corner/edges
+    const turned = outline(
+      ([[0, 0], [90, 0], [90, 45], [0, 45]] as [number, number][]).map(([x, y]) => {
+        const point = rotatePoint({ x, y }, Math.PI / 6)
+        return [point.x, point.y] as [number, number]
+      }),
+    )
+
+    expect(rectFitsFootprint({ x: 0, y: 0, w: 2, h: 1 }, 3, 3, fp(turned, 0, 30))).toBe(true)
+    expect(rectFitsFootprint({ x: 0, y: 0, w: 2, h: 1 }, 3, 3, fp(turned, 0, 0))).toBe(false)
+    // nominal contact is fine at zero clearance, but the fit gap is Euclidean
+    expect(rectFitsFootprint({ x: 0, y: 0, w: 2, h: 1 }, 3, 3, fp(turned, 5, 30))).toBe(false)
+  })
+
+  it('lets the measured boundary, not the display grid, decide for a photo plan', () => {
+    // An 84x84mm floor inside a stored 1x1 legacy display rectangle still fits
+    // a 2x1 bin: scans and capacity must cover the same floor as containment.
+    const floor = outline([[0, 0], [84, 0], [84, 84], [0, 84]])
+
+    expect(rectFitsFootprint({ x: 0, y: 0, w: 2, h: 1 }, 1, 1, fp(floor))).toBe(true)
+    expect(rectFitsFootprint({ x: 0, y: 0, w: 2, h: 1 }, 1, 1, null)).toBe(false)
+    expect(findFreeSpot(bin('large', 2, 1), [], 1, 1, { footprint: fp(floor) })).toEqual({ x: 0, y: 0, rotation: 0 })
+    const arranged = autoArrange([placement('large', 9, 9)], binById([bin('large', 2, 1)]), 1, 1, fp(floor))
+    expect(arranged.unfittedIds).toEqual([])
+    expect(arranged.placements[0]).toMatchObject({ x: 0, y: 0 })
+    expect(drawerStats(arranged.placements, [bin('large', 2, 1)], 1, 1, fp(floor))).toMatchObject({
+      drawerUnits: 4, usedUnits: 2, freeUnits: 2,
+    })
+  })
+
+  it('scans, clamps and renders negative cells in the current offset, non-cardinal frame', () => {
+    const origin = { x: 63, y: 42 }
+    const points = [
+      { x: -42, y: -21 }, { x: 42, y: -21 }, { x: 42, y: 63 }, { x: -42, y: 63 },
+    ].map(p => {
+      const turned = rotatePoint(p, Math.PI / 6)
+      return { x: turned.x + origin.x, y: turned.y + origin.y }
+    })
+    const footprint = { outline: { points, interior_rings: [] }, originXmm: 63, originYmm: 42, rotationDeg: 30, fitClearanceMm: 0 }
+    const bounds = drawerGridBounds(1, 1, footprint)
+    expect(bounds.x0).toBeCloseTo(-1)
+    expect(bounds.y0).toBeCloseTo(-.5)
+    expect(bounds.x1).toBeCloseTo(1)
+    expect(bounds.y1).toBeCloseTo(1.5)
+    expect(gridLines(1, -1)).toEqual([-1, -.5, 0, .5, 1])
+    expect(findFreeSpot(bin('large', 2, 1), [], 1, 1, { footprint })).toEqual({ x: -1, y: 0, rotation: 0 })
+    expect(clampToDrawer({ x: -1, y: 0, w: 2, h: 1 }, 1, 1, 1, footprint)).toEqual({ x: -1, y: 0 })
+    expect(clampToDrawer({ x: 3, y: -3, w: 1, h: 1 }, 1, 1, .5, footprint)).toEqual({ x: 0, y: -.5 })
+    expect(drawerStats([placement('large', -1, 0)], [bin('large', 2, 1)], 1, 1, footprint)).toMatchObject({
+      drawerUnits: 4, usedUnits: 2, freeUnits: 2,
+    })
+  })
+})
+

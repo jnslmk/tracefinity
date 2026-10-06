@@ -6,9 +6,10 @@ import { Bounds, GizmoHelper, GizmoViewport, Html, OrbitControls, useBounds } fr
 import * as THREE from 'three'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { ArrowRight, ArrowUp, Box, CircleDot, RotateCcw, Triangle } from 'lucide-react'
-import type { BinSummary, ProjectBinPlacement, ToolEnvelope, ToolboxAssessment } from '@/types'
+import type { BinSummary, DrawerOutline, Point, ProjectBinPlacement, ToolEnvelope, ToolboxAssessment } from '@/types'
 import { GRID_UNIT } from '@/lib/constants'
-import { DEFAULT_BIN_COLOR, binFootprint, gridLines, placementRect, rotationOffsetMm } from '@/lib/drawerLayout'
+import { DEFAULT_BIN_COLOR, binFootprint, drawerGridBounds, placementRect, rotationOffsetMm } from '@/lib/drawerLayout'
+import { footprintCorners, outlineBounds, shapeInsideOutline } from '@/lib/drawerOutline'
 import { useBinStlUrls } from '@/hooks/useBinStlUrls'
 
 interface Props {
@@ -21,6 +22,12 @@ interface Props {
   outOfBounds: Set<string>
   assessment: ToolboxAssessment | null
   onSelect: (placementId: string | null) => void
+  /** Measured floor boundary in drawer millimetres. */
+  outline?: DrawerOutline | null
+  /** Grid frame anchored at this drawer-space origin. */
+  gridOriginMm?: Point
+  /** Grid turn about its origin, degrees clockwise. */
+  gridRotationDeg?: number
 }
 
 type CameraView = 'home' | 'top' | 'front' | 'right' | 'fit'
@@ -43,29 +50,67 @@ function selectedColor(color: string): string {
 // three.js is y-up: drawer x maps to x, drawer y (top down) maps to z.
 // geometry is declared as JSX so react-three-fiber owns the dispose lifecycle.
 
-function DrawerFloor({ drawerX, drawerY }: { drawerX: number; drawerY: number }) {
+function DrawerFloor({ drawerX, drawerY, outline, originXmm, originYmm, rotationDeg }: {
+  drawerX: number
+  drawerY: number
+  outline: DrawerOutline | null
+  originXmm: number
+  originYmm: number
+  rotationDeg: number
+}) {
   const widthMm = drawerX * GRID_UNIT
   const depthMm = drawerY * GRID_UNIT
+  const origin = useMemo(() => ({ x: originXmm, y: originYmm }), [originXmm, originYmm])
+
+  // the measured boundary becomes the floor itself: its concavities and holes are
+  // real floor edges, not a rectangle with an outline drawn over it
+  const floorGeometry = useMemo(() => {
+    if (!outline) return null
+    const shape = new THREE.Shape(outline.points.map(p => new THREE.Vector2(p.x, -p.y)))
+    shape.holes = outline.interior_rings.map(ring => new THREE.Path(ring.map(p => new THREE.Vector2(p.x, -p.y))))
+    const geometry = new THREE.ShapeGeometry(shape)
+    geometry.rotateX(-Math.PI / 2)
+    return geometry
+  }, [outline])
+  useEffect(() => () => floorGeometry?.dispose(), [floorGeometry])
 
   const gridPositions = useMemo(() => {
     const positions: number[] = []
-    for (const unit of gridLines(drawerX)) {
-      const x = unit * GRID_UNIT
-      positions.push(x, 0.2, 0, x, 0.2, depthMm)
-    }
-    for (const unit of gridLines(drawerY)) {
-      const z = unit * GRID_UNIT
-      positions.push(0, 0.2, z, widthMm, 0.2, z)
+    // one closed loop per half-unit cell, so a turned grid stays a clipped grid
+    // instead of lines that run off the floor
+    const bounds = drawerGridBounds(drawerX, drawerY, {
+      outline, originXmm, originYmm, rotationDeg, fitClearanceMm: 0,
+    })
+    const ix0 = outline ? Math.floor((bounds.x0 + 1e-9) * 2) : 0
+    const iy0 = outline ? Math.floor((bounds.y0 + 1e-9) * 2) : 0
+    const ix1 = outline ? Math.ceil((bounds.x1 - 1e-9) * 2) : Math.round(drawerX * 2)
+    const iy1 = outline ? Math.ceil((bounds.y1 - 1e-9) * 2) : Math.round(drawerY * 2)
+    for (let iy = iy0; iy < iy1; iy++) {
+      for (let ix = ix0; ix < ix1; ix++) {
+        const corners = footprintCorners(origin, rotationDeg, ix / 2, iy / 2, 0.5, 0.5)
+        if (outline && !shapeInsideOutline(corners, outline)) continue
+        for (let i = 0; i < 4; i++) {
+          const a = corners[i]
+          const b = corners[(i + 1) % 4]
+          positions.push(a.x, 0.2, a.y, b.x, 0.2, b.y)
+        }
+      }
     }
     return new Float32Array(positions)
-  }, [drawerX, drawerY, widthMm, depthMm])
+  }, [drawerX, drawerY, outline, origin, originXmm, originYmm, rotationDeg])
 
   return (
     <group>
-      <mesh position={[widthMm / 2, 0, depthMm / 2]} rotation={[-Math.PI / 2, 0, 0]}>
-        <planeGeometry args={[widthMm, depthMm]} />
-        <meshStandardMaterial color="#27272a" roughness={1} metalness={0} />
-      </mesh>
+      {floorGeometry ? (
+        <mesh geometry={floorGeometry}>
+          <meshStandardMaterial color="#27272a" roughness={1} metalness={0} side={THREE.DoubleSide} />
+        </mesh>
+      ) : (
+        <mesh position={[originXmm + widthMm / 2, 0, originYmm + depthMm / 2]} rotation={[-Math.PI / 2, 0, 0]}>
+          <planeGeometry args={[widthMm, depthMm]} />
+          <meshStandardMaterial color="#27272a" roughness={1} metalness={0} />
+        </mesh>
+      )}
       <lineSegments>
         <bufferGeometry>
           <bufferAttribute attach="attributes-position" args={[gridPositions, 3]} />
@@ -356,11 +401,22 @@ export function DrawerSketch3D({
   outOfBounds,
   assessment,
   onSelect,
+  outline = null,
+  gridOriginMm = { x: 0, y: 0 },
+  gridRotationDeg = 0,
 }: Props) {
   const [renderMode, setRenderMode] = useState<RenderMode>('solid')
-  const widthMm = drawerX * GRID_UNIT
-  const depthMm = drawerY * GRID_UNIT
+  const floorBounds = outline ? outlineBounds(outline) : {
+    x0: gridOriginMm.x, y0: gridOriginMm.y,
+    x1: gridOriginMm.x + drawerX * GRID_UNIT, y1: gridOriginMm.y + drawerY * GRID_UNIT,
+  }
+  const widthMm = floorBounds.x1 - floorBounds.x0
+  const depthMm = floorBounds.y1 - floorBounds.y0
+  const centerXmm = (floorBounds.x0 + floorBounds.x1) / 2
+  const centerYmm = (floorBounds.y0 + floorBounds.y1) / 2
   const span = Math.max(widthMm, depthMm)
+  const originXmm = gridOriginMm.x
+  const originYmm = gridOriginMm.y
 
   // changes whenever the framed content changes: drawer size, assessment revision,
   // ceiling height, or any placement's elevation/top, so the camera refits when
@@ -368,10 +424,14 @@ export function DrawerSketch3D({
   const fitKey = useMemo(() => [
     drawerX,
     drawerY,
+    originXmm,
+    originYmm,
+    gridRotationDeg,
+    outline ? JSON.stringify(outline) : 'rect',
     assessment?.geometry_revision ?? 'none',
     assessment?.height_mm ?? 'none',
     assessment ? assessment.placements.map(p => `${p.placement_id}:${p.z_mm}:${p.top_mm}`).join(',') : '',
-  ].join('|'), [drawerX, drawerY, assessment])
+  ].join('|'), [drawerX, drawerY, originXmm, originYmm, gridRotationDeg, outline, assessment])
 
   const dispatchView = useCallback((view: CameraView) => {
     window.dispatchEvent(new CustomEvent(VIEW_EVENT, { detail: view }))
@@ -389,12 +449,15 @@ export function DrawerSketch3D({
 
         <Suspense fallback={null}>
           <Bounds clip margin={1.15}>
-            <group position={[-widthMm / 2, 0, -depthMm / 2]}>
-              <DrawerFloor drawerX={drawerX} drawerY={drawerY} />
-              {assessment && <DrawerModels key={assessment.geometry_revision} bins={bins} placements={placements}
-                drawerX={drawerX} drawerY={drawerY} selectedPlacementId={selectedPlacementId} overlapping={overlapping}
-                outOfBounds={outOfBounds} assessment={assessment} renderMode={renderMode} onSelect={onSelect} />}
-              {assessment?.height_mm != null && <mesh position={[widthMm / 2, assessment.height_mm, depthMm / 2]}>
+            <group position={[-centerXmm, 0, -centerYmm]}>
+              <DrawerFloor drawerX={drawerX} drawerY={drawerY} outline={outline} originXmm={originXmm} originYmm={originYmm} rotationDeg={gridRotationDeg} />
+              {/* the grid frame turns with the drawer edge; drawer x maps to three x, drawer y to three z */}
+              <group position={[originXmm, 0, originYmm]} rotation={[0, (-gridRotationDeg * Math.PI) / 180, 0]}>
+                {assessment && <DrawerModels key={assessment.geometry_revision} bins={bins} placements={placements}
+                  drawerX={drawerX} drawerY={drawerY} selectedPlacementId={selectedPlacementId} overlapping={overlapping}
+                  outOfBounds={outOfBounds} assessment={assessment} renderMode={renderMode} onSelect={onSelect} />}
+              </group>
+              {assessment?.height_mm != null && <mesh position={[centerXmm, assessment.height_mm, centerYmm]}>
                 <boxGeometry args={[widthMm, .3, depthMm]} />
                 <meshStandardMaterial color="#e57474" transparent opacity={.12} depthWrite={false} />
               </mesh>}

@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { getProject, listBins, stackAction, updateProjectSketch } from '@/lib/api'
-import type { BinProject, BinSummary, ContainerLimits, ProjectBinPlacement, ProjectSketch } from '@/types'
+import { getImageUrl, getProject, listBins, stackAction, updateProjectSketch } from '@/lib/api'
+import type { BinProject, BinSummary, ContainerLimits, DrawerGridAlignment, DrawerOutline, DrawerPhotoCalibration, ProjectBinPlacement, ProjectSketch } from '@/types'
 import { Alert } from '@/components/Alert'
 import { Breadcrumb } from '@/components/Breadcrumb'
 import { NumericInput } from '@/components/NumericInput'
@@ -12,6 +12,7 @@ import { DrawerSketch3D } from '@/components/DrawerSketch3D'
 import { useDebouncedSave } from '@/hooks/useDebouncedSave'
 import { useToolboxPlanning } from '@/hooks/useToolboxPlanning'
 import { GRID_UNIT } from '@/lib/constants'
+import type { DrawerFootprint } from '@/lib/drawerLayout'
 import {
   DEFAULT_DRAWER_GRID_X,
   DEFAULT_DRAWER_GRID_Y,
@@ -23,6 +24,7 @@ import {
   binById,
   binFootprint,
   clampToDrawer,
+  drawerGridBounds,
   drawerStats,
   findFreeSpot,
   findLayoutConflicts,
@@ -33,6 +35,7 @@ import {
   snapForBin,
   snapUnits,
 } from '@/lib/drawerLayout'
+import { outlineArea, outlineBounds, outlinePerimeter } from '@/lib/drawerOutline'
 import { assessmentCoversDraft, heightLayers, occupyingPlacementIds, resolveLayerSelection } from '@/lib/drawerLayers'
 import { binLabel } from '@/lib/projectSelectors'
 import { cn } from '@/lib/utils'
@@ -100,13 +103,26 @@ export default function ProjectSketchPage() {
   const [error, setError] = useState<string | null>(null)
 
   const [container, setContainer] = useState<ContainerLimits>({ container_width_mm: null, container_depth_mm: null, container_height_mm: null, safety_clearance_mm: 0 })
+  const [outline, setOutline] = useState<DrawerOutline | null>(null)
+  const [gridOrigin, setGridOrigin] = useState<DrawerGridAlignment>({ origin_x_mm: 0, origin_y_mm: 0, rotation_deg: 0 })
+  const [fitClearanceMm, setFitClearanceMm] = useState(0)
+  const [sourcePhoto, setSourcePhoto] = useState<DrawerPhotoCalibration | null>(null)
+  const [showPhoto, setShowPhoto] = useState(true)
   const [actionBusy, setActionBusy] = useState(false)
   const [removeDialogId, setRemoveDialogId] = useState<string | null>(null)
   const [removeBinCopies, setRemoveBinCopies] = useState(false)
   const saveFlight = useRef<Promise<unknown>>(Promise.resolve())
   const removeDialogRef = useRef<HTMLDialogElement>(null)
   useEffect(() => { if (removeDialogId) removeDialogRef.current?.showModal() }, [removeDialogId])
-  const draft = useMemo(() => ({ ...container, target_grid_x: drawerX, target_grid_y: drawerY, bin_layout: placements }), [container, drawerX, drawerY, placements])
+  const draft = useMemo(
+    () => ({ ...container, target_grid_x: drawerX, target_grid_y: drawerY, bin_layout: placements, outline, grid_alignment: gridOrigin, fit_clearance_mm: fitClearanceMm }),
+    [container, drawerX, drawerY, placements, outline, gridOrigin, fitClearanceMm],
+  )
+  // the boundary, its grid frame and the fit clearance drive warnings, packing and stats
+  const footprint = useMemo<DrawerFootprint>(
+    () => ({ outline, originXmm: gridOrigin.origin_x_mm, originYmm: gridOrigin.origin_y_mm, rotationDeg: gridOrigin.rotation_deg, fitClearanceMm }),
+    [outline, gridOrigin, fitClearanceMm],
+  )
   const { assessment, error: assessmentError, refresh: refreshAssessment } = useToolboxPlanning(projectId, sketchId, draft, Boolean(sketch))
   useEffect(() => {
     async function load() {
@@ -124,6 +140,10 @@ export default function ProjectSketchPage() {
         setDrawerX(sketchData.target_grid_x)
         setDrawerY(sketchData.target_grid_y)
         setContainer({ container_width_mm: sketchData.container_width_mm ?? null, container_depth_mm: sketchData.container_depth_mm ?? null, container_height_mm: sketchData.container_height_mm ?? null, safety_clearance_mm: sketchData.safety_clearance_mm ?? 0 })
+        setOutline(sketchData.outline ?? null)
+        setGridOrigin(sketchData.grid_alignment ?? { origin_x_mm: 0, origin_y_mm: 0, rotation_deg: 0 })
+        setFitClearanceMm(sketchData.fit_clearance_mm ?? 0)
+        setSourcePhoto(sketchData.source ?? null)
       } catch (err) {
         setError(err instanceof Error ? err.message : 'failed to load project')
       } finally {
@@ -133,9 +153,10 @@ export default function ProjectSketchPage() {
     load()
   }, [projectId, sketchId])
 
-  const hasDrawer = (container.container_width_mm != null || drawerX !== null) && (container.container_depth_mm != null || drawerY !== null)
+  const hasDrawer = Boolean(outline) || ((container.container_width_mm != null || drawerX !== null) && (container.container_depth_mm != null || drawerY !== null))
   const gridX = container.container_width_mm != null ? container.container_width_mm / GRID_UNIT : drawerX ?? DEFAULT_DRAWER_GRID_X
   const gridY = container.container_depth_mm != null ? container.container_depth_mm / GRID_UNIT : drawerY ?? DEFAULT_DRAWER_GRID_Y
+  const gridBounds = useMemo(() => drawerGridBounds(gridX, gridY, footprint), [gridX, gridY, footprint])
 
   const currentBins = assessment?.bins ?? bins
   const binMap = useMemo(() => binById(currentBins), [currentBins])
@@ -147,10 +168,20 @@ export default function ProjectSketchPage() {
     return counts
   }, [placements])
   const { overlapping, outOfBounds } = useMemo(
-    () => findLayoutConflicts(placements, binMap, gridX, gridY),
-    [placements, binMap, gridX, gridY],
+    () => findLayoutConflicts(placements, binMap, gridX, gridY, footprint),
+    [placements, binMap, gridX, gridY, footprint],
   )
-  const stats = useMemo(() => drawerStats(placements, currentBins, Math.floor(gridX * 2) / 2, Math.floor(gridY * 2) / 2), [placements, currentBins, gridX, gridY])
+  const stats = useMemo(() => drawerStats(placements, currentBins, Math.floor(gridX * 2) / 2, Math.floor(gridY * 2) / 2, footprint), [placements, currentBins, gridX, gridY, footprint])
+  const outlineExtent = useMemo(() => (outline ? outlineBounds(outline) : null), [outline])
+  const outlineAreaMm2 = useMemo(() => (outline ? outlineArea(outline) : 0), [outline])
+  const outlinePerimeterMm = useMemo(() => (outline ? outlinePerimeter(outline) : 0), [outline])
+  // the source photo is anchored to drawer millimetres at the origin, so moving
+  // the grid anchor never moves it relative to the boundary
+  const sourceImage = useMemo(() => (sourcePhoto ? {
+    url: getImageUrl(sourcePhoto.corrected_image_url),
+    widthMm: sourcePhoto.image_width * sourcePhoto.scale_factor,
+    heightMm: sourcePhoto.image_height * sourcePhoto.scale_factor,
+  } : null), [sourcePhoto])
   const sideBaseline = assessment?.height_mm ?? Math.max(70, ...(assessment?.placements.map(p => p.top_mm) ?? []))
   const sideMinY = Math.min(-15, sideBaseline - Math.max(0, ...(assessment?.placements.map(p => p.top_mm) ?? [])) - 15)
   const selectedPlacement = placements.find(placement => placement.id === selectedPlacementId) || null
@@ -296,7 +327,7 @@ export default function ProjectSketchPage() {
     setSelectedPlacementId(placementId)
     // the free spot is derived inside the updater so rapid clicks never stack bins
     setPlacements(prev => {
-      const spot = findFreeSpot(bin, occupiedRects(prev), gridX, gridY)
+      const spot = findFreeSpot(bin, occupiedRects(prev), gridX, gridY, { footprint })
       return [...prev, {
         id: placementId,
         bin_id: binId,
@@ -308,7 +339,7 @@ export default function ProjectSketchPage() {
     })
     // a new copy rests on the floor; showing all levels keeps it from vanishing
     if (layerElevation !== null && layerElevation > 0) setLayerElevation(null)
-  }, [binMap, gridX, gridY, occupiedRects, colorForBin, layerElevation])
+  }, [binMap, gridX, gridY, occupiedRects, colorForBin, layerElevation, footprint])
 
   const handleDuplicate = useCallback((placementId: string) => {
     const source = placements.find(placement => placement.id === placementId)
@@ -318,7 +349,7 @@ export default function ProjectSketchPage() {
     const copyId = newPlacementId()
     setSelectedPlacementId(copyId)
     setPlacements(prev => {
-      const spot = findFreeSpot(bin, occupiedRects(prev), gridX, gridY, { rotation: source.rotation })
+      const spot = findFreeSpot(bin, occupiedRects(prev), gridX, gridY, { rotation: source.rotation, footprint })
       return [...prev, {
         ...source,
         id: copyId,
@@ -330,7 +361,7 @@ export default function ProjectSketchPage() {
     })
     // the copy is re-seated on the floor; showing all levels keeps it from vanishing
     if (layerElevation !== null && layerElevation > 0) setLayerElevation(null)
-  }, [placements, binMap, gridX, gridY, occupiedRects, layerElevation])
+  }, [placements, binMap, gridX, gridY, occupiedRects, layerElevation, footprint])
 
   const handleSetColor = useCallback((placementId: string, color: string | null) => {
     setPlacements(prev => prev.map(placement => (
@@ -373,17 +404,17 @@ export default function ProjectSketchPage() {
       const rotation = nextRotation(root.rotation)
       if (!bin) return prev
       const { w, h } = binFootprint(bin, rotation)
-      const clamped = clampToDrawer({ x: root.x, y: root.y, w, h }, gridX, gridY, snapForBin(bin))
+      const clamped = clampToDrawer({ x: root.x, y: root.y, w, h }, gridX, gridY, snapForBin(bin), footprint)
       return transformStack(prev, root.id, clamped.x, clamped.y, rotation)
     })
-  }, [binMap, gridX, gridY])
+  }, [binMap, gridX, gridY, footprint])
 
   const handleAutoArrange = useCallback(() => {
     const seeding = placements.length === 0
     const input = seeding
       ? currentBins.map(bin => ({ id: newPlacementId(), bin_id: bin.id, x: 0, y: 0, rotation: 0, color: null }))
       : placements
-    const result = autoArrange(input, binMap, gridX, gridY)
+    const result = autoArrange(input, binMap, gridX, gridY, footprint)
     const unfitted = new Set(result.unfittedIds)
     const count = unfitted.size
 
@@ -392,7 +423,7 @@ export default function ProjectSketchPage() {
     setPlacements(seeding ? result.placements.filter(placement => !unfitted.has(placement.id)) : result.placements)
     setArrangeMisfits(count === 0 ? null : { kind: seeding ? 'skipped' : 'kept', ids: result.unfittedIds })
     setSelectedPlacementId(null)
-  }, [placements, currentBins, binMap, gridX, gridY])
+  }, [placements, currentBins, binMap, gridX, gridY, footprint])
 
   const handleEnableDrawer = useCallback(() => {
     setDrawerX(DEFAULT_DRAWER_GRID_X)
@@ -512,7 +543,7 @@ export default function ProjectSketchPage() {
               </label>
               <p>Floor datum: supporting surface beneath the lowest bin bases. Subtract installed baseplate or liner elevation from floor-to-closed-lid height. 10u means 70 mm, not guaranteed fit. Zero gap is not a manufacturing tolerance.</p>
               <button type="button" className="btn-secondary px-2 py-1" onClick={() => setContainer({ container_width_mm: null, container_depth_mm: null, container_height_mm: null, safety_clearance_mm: 0 })}>Clear physical limits</button>
-              <p>Millimetre dimensions take precedence over grid controls. Clearing limits preserves placements.</p>
+              <p>{outline ? 'The measured floor controls horizontal fit; these rectangular dimensions do not restrict photo-plan packing or grids.' : 'Millimetre dimensions take precedence over grid controls. Clearing limits preserves placements.'}</p>
             </fieldset>
             {hasDrawer ? (
               <div className="space-y-2">
@@ -541,7 +572,7 @@ export default function ProjectSketchPage() {
                   />
                 </label>
                 <p className="text-[10px] text-text-muted">
-                  {gridX} x {gridY} units · {(gridX * GRID_UNIT).toFixed(0)} x {(gridY * GRID_UNIT).toFixed(0)} mm
+                  {outline ? `Legacy rectangle ${gridX} × ${gridY} units (not a fit or scan limit)` : `${gridX} × ${gridY} units · ${(gridX * GRID_UNIT).toFixed(0)} × ${(gridY * GRID_UNIT).toFixed(0)} mm`}
                 </p>
                 <button
                   type="button"
@@ -566,6 +597,86 @@ export default function ProjectSketchPage() {
               </div>
             )}
           </div>
+
+          {outline && (
+            <section aria-label="Measured boundary" className="glass rounded-[10px] px-3 py-3 space-y-2 text-[11px] text-text-secondary">
+              <h3 className="text-[10px] font-semibold text-text-muted uppercase tracking-[1.5px]">Measured boundary</h3>
+              <p>
+                Extent{' '}
+                <span className="tabular-nums">
+                  {outlineExtent ? (outlineExtent.x1 - outlineExtent.x0).toFixed(1) : '?'} × {outlineExtent ? (outlineExtent.y1 - outlineExtent.y0).toFixed(1) : '?'} mm
+                </span>
+                {' · '}area <span className="tabular-nums">{(outlineAreaMm2 / 100).toFixed(1)} cm² ({(outlineAreaMm2 / (GRID_UNIT * GRID_UNIT)).toFixed(2)} units)</span>
+                {' · '}perimeter <span className="tabular-nums">{outlinePerimeterMm.toFixed(1)} mm</span>
+              </p>
+              <p className="text-text-muted">
+                The extent is a bounding box, not the containment geometry: concavities and exclusions decide what a footprint
+                covers. This boundary is photo-derived and its physical fit is unverified — check the real drawer edge.
+              </p>
+              <label className="block">Container-fit clearance (mm)
+                <input
+                  aria-label="Container-fit clearance"
+                  type="number" min={0} max={100} step={.5}
+                  value={fitClearanceMm}
+                  className="w-full bg-elevated border border-border rounded px-2 py-1"
+                  onChange={event => {
+                    const value = Number(event.target.value)
+                    if (Number.isFinite(value) && value >= 0) setFitClearanceMm(value)
+                  }}
+                />
+              </label>
+              <p className="text-text-muted">Separate from the vertical safety clearance: the gap kept around a footprint at the boundary.</p>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="block">Grid origin X (mm)
+                  <input
+                    aria-label="Grid origin X" type="number" step={1}
+                    value={gridOrigin.origin_x_mm}
+                    className="w-full bg-elevated border border-border rounded px-2 py-1"
+                    onChange={event => {
+                      const value = Number(event.target.value)
+                      if (Number.isFinite(value) && Math.abs(value) <= 500) setGridOrigin(prev => ({ ...prev, origin_x_mm: value }))
+                    }}
+                  />
+                </label>
+                <label className="block">Grid origin Y (mm)
+                  <input
+                    aria-label="Grid origin Y" type="number" step={1}
+                    value={gridOrigin.origin_y_mm}
+                    className="w-full bg-elevated border border-border rounded px-2 py-1"
+                    onChange={event => {
+                      const value = Number(event.target.value)
+                      if (Number.isFinite(value) && Math.abs(value) <= 500) setGridOrigin(prev => ({ ...prev, origin_y_mm: value }))
+                    }}
+                  />
+                </label>
+              </div>
+              <label className="block">Grid rotation (deg, clockwise)
+                <input
+                  aria-label="Grid rotation" type="number" step={0.5} min={-180} max={180}
+                  value={gridOrigin.rotation_deg}
+                  className="w-full bg-elevated border border-border rounded px-2 py-1"
+                  onChange={event => {
+                    const value = Number(event.target.value)
+                    if (Number.isFinite(value) && Math.abs(value) <= 180) setGridOrigin(prev => ({ ...prev, rotation_deg: value }))
+                  }}
+                />
+              </label>
+              <p className="text-text-muted">Turn the grid to a straight drawer edge that is not parallel to the reference paper, then anchor it. Placements still snap to half or full units and rotate in 90° steps inside the grid.</p>
+              {sourceImage && (
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" checked={showPhoto} onChange={event => setShowPhoto(event.target.checked)} />
+                  Show source photo
+                </label>
+              )}
+              <button
+                type="button"
+                className="btn-secondary w-full px-2 py-1"
+                onClick={() => router.push(`/projects/${project.id}/sketch/photo?sketchId=${sketch.id}`)}
+              >
+                Edit source photo or boundary
+              </button>
+            </section>
+          )}
 
           {hasDrawer && <section aria-label="Height layers" className="glass rounded-[10px] px-3 py-3">
             <div className="flex items-center justify-between gap-2 mb-2">
@@ -634,7 +745,8 @@ export default function ProjectSketchPage() {
             {!assessment && !assessmentError && <p role="status">Assessing current plan…</p>}
             {assessment && <>
               <p role="status" data-testid="plan-fit-status">Fit: {assessment.status}</p>
-              <p>Usable grid {assessment.grid_x ?? 'unknown'} × {assessment.grid_y ?? 'unknown'}; residual edge strips {assessment.residual_width_mm?.toFixed(1) ?? '?'} × {assessment.residual_depth_mm?.toFixed(1) ?? '?'} mm.</p>
+              {!outline && <p>Usable grid {assessment.grid_x ?? 'unknown'} × {assessment.grid_y ?? 'unknown'}; residual edge strips {assessment.residual_width_mm?.toFixed(1) ?? '?'} × {assessment.residual_depth_mm?.toFixed(1) ?? '?'} mm.</p>}
+              {outline && <p>Measured boundary: {assessment.floor_area_units?.toFixed(2) ?? '?'} grid units of floor, {assessment.usable_area_units.toFixed(2)} usable in whole half-cells, {assessment.fit_clearance_mm} mm fit clearance. The boundary, not a rectangle, decides what fits; the photo cannot verify physical fit.</p>}
               <p>Occupied floor {assessment.occupied_floor_units} units; free {assessment.free_cells.length / 4} units in {assessment.free_regions.length} connected regions.</p>
               {assessment.free_regions.map((region, i) => <p key={i}>Free region {i + 1}: {region.area_units} units (not a packing guarantee)</p>)}
               {assessment.violations.map((v, i) => <p role="alert" key={i}>{v.message}{v.clearance_mm !== undefined ? ` (${v.clearance_mm.toFixed(2)} mm)` : ''} {v.placement_id && `Placement ${v.placement_id}`}</p>)}
@@ -884,15 +996,20 @@ export default function ProjectSketchPage() {
               onMove={handleMove}
               onDropBin={handleDropBin}
               assessment={assessment}
+              outline={outline}
+              gridOriginMm={{ x: gridOrigin.origin_x_mm, y: gridOrigin.origin_y_mm }}
+              gridRotationDeg={gridOrigin.rotation_deg}
+              sourceImage={sourceImage}
+              showSource={showPhoto}
             />
           ) : view === 'side' ? (
             <div className="w-full h-full p-6">
               <p className="text-text-secondary text-xs mb-3">Side clearance diagram: conservative tool envelopes and bin extents. Use 3D for actual generated surfaces.</p>
               {!assessment ? <p role="status">Assessment pending</p> : <svg role="img" aria-label="Side clearance diagram" className="w-full h-[80%]"
-                viewBox={`-5 ${sideMinY} ${gridX * GRID_UNIT + 10} ${sideBaseline + 15 - sideMinY}`}>
+                viewBox={`${gridBounds.x0 * GRID_UNIT - 5} ${sideMinY} ${(gridBounds.x1 - gridBounds.x0) * GRID_UNIT + 10} ${sideBaseline + 15 - sideMinY}`}>
                 {assessment.height_mm != null && <>
-                  <line x1="0" x2={gridX * GRID_UNIT} y1="0" y2="0" stroke="var(--color-text-primary)" strokeDasharray="4 2" />
-                  <text x="0" y="-5" fontSize="5" fill="var(--color-text-primary)">Closed lid ceiling {assessment.height_mm} mm</text>
+                  <line x1={gridBounds.x0 * GRID_UNIT} x2={gridBounds.x1 * GRID_UNIT} y1="0" y2="0" stroke="var(--color-text-primary)" strokeDasharray="4 2" />
+                  <text x={gridBounds.x0 * GRID_UNIT} y="-5" fontSize="5" fill="var(--color-text-primary)">Closed lid ceiling {assessment.height_mm} mm</text>
                 </>}
                 {visibleAssessedPlacements.map(p => {
                   const placement = placements.find(item => item.id === p.placement_id)
@@ -928,6 +1045,9 @@ export default function ProjectSketchPage() {
               outOfBounds={outOfBounds}
               assessment={assessment}
               onSelect={setSelectedPlacementId}
+              outline={outline}
+              gridOriginMm={{ x: gridOrigin.origin_x_mm, y: gridOrigin.origin_y_mm }}
+              gridRotationDeg={gridOrigin.rotation_deg}
             />
           )}
 

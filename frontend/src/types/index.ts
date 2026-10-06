@@ -116,6 +116,10 @@ export interface UploadResponse {
   session_id: string
   image_url: string
   detected_corners: Point[] | null
+  image_width: number | null
+  image_height: number | null
+  corner_source: 'detected' | 'station' | 'none'
+  station_id: string | null
 }
 
 export interface CornersResponse {
@@ -281,14 +285,56 @@ export interface ContainerLimits {
   safety_clearance_mm?: number
 }
 
+/**
+ * Measured usable-floor boundary in drawer-space millimetres (x right, y down).
+ * `points` is the outer ring; `interior_rings` are excluded obstructions.
+ */
+export interface DrawerOutline {
+  points: Point[]
+  interior_rings: Point[][]
+}
+
+/** Plan-owned uncorrected original, corrected metric frame and paper context. */
+export interface DrawerPhotoCalibration {
+  session_id: string
+  corrected_image_url: string
+  original_image_url: string | null
+  image_width: number
+  image_height: number
+  paper_size: PaperSize
+  /** millimetres per corrected-image pixel */
+  scale_factor: number
+  corners: Point[]
+  seed: Point | null
+}
+
+/** The grid frame relative to the drawer origin: an anchor and a turn. */
+export interface DrawerGridAlignment {
+  origin_x_mm: number
+  origin_y_mm: number
+  rotation_deg: number
+}
+
 export interface ProjectSketch extends ContainerLimits {
   id: string
   name: string
   target_grid_x: number | null
   target_grid_y: number | null
   bin_layout: ProjectBinPlacement[]
+  outline?: DrawerOutline | null
+  source?: DrawerPhotoCalibration | null
+  grid_alignment?: DrawerGridAlignment
+  fit_clearance_mm?: number
   created_at: string | null
   updated_at: string | null
+}
+
+/** A candidate interior boundary returned by the provider, in millimetres. */
+export interface DrawerOutlineCandidate {
+  outline: DrawerOutline
+  mask_url: string | null
+  image_width: number
+  image_height: number
 }
 
 export interface BinProject {
@@ -486,6 +532,12 @@ export interface ToolboxAssessment {
   free_cells: { x: number; y: number; w: number; h: number }[]
   free_regions: { area_units: number; cells: Point[] }[]
   stacks: { root_id: string; headroom_mm: number | null }[]
+  /** Area of the grid cells fully covered by the boundary, in grid units. */
+  usable_area_units: number
+  /** Continuous boundary area in grid units, or null for a rectangular plan. */
+  floor_area_units: number | null
+  grid_origin_mm: { x: number; y: number }
+  fit_clearance_mm: number
 }
 
 export interface AuthStatus {

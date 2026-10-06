@@ -168,6 +168,9 @@ class CornersRequest(BaseModel):
     corners: list[Point]
     paper_size: PaperSize
     save_station_name: str | None = None
+    # the drawer photo flow keeps the uncorrected frame so a plan can adopt it;
+    # ordinary tool tracing still discards it with the correction
+    retain_original: bool = False
 
 
 class CornersResponse(BaseModel):
@@ -599,7 +602,7 @@ PLACEMENT_ROTATIONS = (0, 90, 180, 270)
 
 
 class ProjectBinPlacement(BaseModel):
-    """Position of one bin on the project drawer grid, in gridfinity units from the top-left.
+    """Position of one bin in grid-frame units (signed when a photo grid is offset).
 
     A bin may be placed more than once, so placements carry their own id.
     """
@@ -625,9 +628,9 @@ class ProjectBinPlacement(BaseModel):
     @field_validator("x", "y")
     @classmethod
     def validate_offset(cls, v: float) -> float:
-        if v < 0 or v > MAX_TARGET_GRID:
-            raise ValueError(f"placement offset must be between 0 and {MAX_TARGET_GRID}")
-        if v * 2 != int(v * 2):
+        if not math.isfinite(v):
+            raise ValueError("placement offset must be finite")
+        if v % 0.5 != 0:
             raise ValueError("placement offset must be a multiple of 0.5")
         return v
 
@@ -661,6 +664,59 @@ class ContainerLimits(BaseModel):
     )(_measurement_input)
 
 
+class DrawerOutline(BaseModel):
+    """Measured usable-floor boundary of a drawer plan, in drawer-space millimetres.
+
+    ``points`` is the outer ring; ``interior_rings`` are excluded obstructions
+    (walls, bosses, hinges, latches). The bounding box of the rings is an extent,
+    never the containment geometry: concavities and interior rings decide what a
+    footprint actually covers.
+    """
+
+    points: list[Point]
+    interior_rings: list[list[Point]] = []
+
+    @model_validator(mode="after")
+    def validate_rings(self) -> "DrawerOutline":
+        for ring in [self.points, *self.interior_rings]:
+            if len(ring) < 3:
+                raise ValueError("every outline ring needs at least 3 points")
+        return self
+
+
+class DrawerPhotoCalibration(BaseModel):
+    """Where a plan's outline came from: the unwarped photo and its metric scale.
+
+    ``corners`` are the paper corners in the original upload frame; ``scale_factor``
+    is millimetres per corrected-image pixel, so the source overlay and every
+    outline point share one metric space that survives later grid alignment.
+    """
+
+    session_id: str
+    corrected_image_url: str
+    original_image_url: str | None = None  # plan-owned uncorrected frame
+    image_width: int = Field(gt=0)
+    image_height: int = Field(gt=0)
+    paper_size: PaperSize
+    scale_factor: float = Field(gt=0, allow_inf_nan=False)
+    corners: list[Point]
+    seed: Point | None = None  # user-selected interior floor point, corrected-image pixels
+
+
+class DrawerGridAlignment(BaseModel):
+    """Grid frame relative to the drawer origin: a millimetre anchor and a turn.
+
+    ``rotation_deg`` aligns the grid to a straight drawer edge that is not
+    parallel to the reference paper, so the two are independent; placements keep
+    snapping to half/full units and rotating in cardinal steps inside that frame.
+    Positive turns clockwise on screen (y-down drawer space).
+    """
+
+    origin_x_mm: float = Field(default=0, ge=-500, le=500, allow_inf_nan=False)
+    origin_y_mm: float = Field(default=0, ge=-500, le=500, allow_inf_nan=False)
+    rotation_deg: float = Field(default=0, ge=-180, le=180, allow_inf_nan=False)
+
+
 class ProjectSketch(ContainerLimits):
     """One drawer plan: a grid plus the bins placed on it. A project may hold several."""
 
@@ -669,6 +725,13 @@ class ProjectSketch(ContainerLimits):
     target_grid_x: float | None = None
     target_grid_y: float | None = None
     bin_layout: list[ProjectBinPlacement] = []
+    # optional photo-derived boundary; absent keeps the rectangular plan working
+    outline: DrawerOutline | None = None
+    source: DrawerPhotoCalibration | None = None
+    grid_alignment: DrawerGridAlignment = Field(default_factory=DrawerGridAlignment)
+    # gap kept between a bin footprint and the measured boundary; distinct from
+    # the vertical safety_clearance_mm the container limits already carry
+    fit_clearance_mm: float = Field(default=0, ge=0, le=100, allow_inf_nan=False)
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -762,6 +825,13 @@ class ProjectSketchCreateRequest(ContainerLimits):
     name: str | None = None
     target_grid_x: float | None = None
     target_grid_y: float | None = None
+    outline: DrawerOutline | None = None
+    grid_alignment: DrawerGridAlignment | None = None
+    fit_clearance_mm: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    # create the plan's source from a calibrated session the caller owns; the
+    # metric scale is re-derived server-side, never accepted from the client
+    source_session_id: str | None = None
+    source_seed: Point | None = None
 
     @field_validator("target_grid_x", "target_grid_y")
     @classmethod
@@ -774,11 +844,41 @@ class ProjectSketchUpdateRequest(ContainerLimits):
     target_grid_x: float | None = None
     target_grid_y: float | None = None
     bin_layout: list[ProjectBinPlacement] | None = None
+    outline: DrawerOutline | None = None
+    grid_alignment: DrawerGridAlignment | None = None
+    fit_clearance_mm: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    # recalibrate the plan's source from another corrected session; the scale is
+    # re-derived server-side, never accepted from the client
+    source_session_id: str | None = None
+    source_seed: Point | None = None
 
     @field_validator("target_grid_x", "target_grid_y")
     @classmethod
     def validate_target_grid(cls, v: float | None) -> float | None:
         return _check_target_grid(v)
+
+
+class DrawerOutlineCandidateRequest(BaseModel):
+    """Ask a tracer to propose the interior floor boundary of a calibrated photo.
+
+    No plan is persisted. ``sketch_id`` targets an unchanged adopted source
+    without a live trace session; ``session_id`` targets a pending capture or
+    recalibration, including a replacement for an existing plan.
+    """
+
+    seed: Point  # corrected-image pixels, positive selection of the interior floor
+    sketch_id: str | None = None
+    session_id: str | None = None
+    provider: Literal["google"] = "google"
+    api_key: str | None = None
+    tracer: str | None = None
+
+
+class DrawerOutlineCandidateResponse(BaseModel):
+    outline: DrawerOutline
+    mask_url: str | None = None
+    image_width: int
+    image_height: int
 
 
 class StackActionRequest(BaseModel):

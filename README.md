@@ -70,6 +70,19 @@ The badges, hosted service links, and installation examples below refer to
 7. Create bins from project tools, arrange the layout
 8. Download STL/3MF for 3D printing
 
+For a drawer whose floor is not a rectangle, a plan can also start from a photo of
+the drawer: the same paper calibration measures the frame, you select the interior
+floor, and the resulting boundary and its obstacle exclusions drive the grid,
+warnings and packing. A boundary from the configured provider is an editable
+proposal, not a verdict — it can follow the case walls, rim or exterior — so
+inspect and correct it, or trace the boundary locally with no key. The boundary is
+photo-derived, so its physical fit is unverified until you measure the real drawer
+edge.
+Plans keep their own original and corrected photos, so you can reopen the original
+for paper recalibration or edit the boundary after the trace session is deleted.
+A replacement photo is reviewed in its own metric frame before Accept changes the
+saved plan. Plan/project deletion cleans only their owned photo copies.
+
 | Dashboard | Tool Editor | Bin Editor |
 |-|-|-|
 | ![Dashboard](docs/screenshots/dashboard.png) | ![Tool Editor](docs/screenshots/tool-editor.png) | ![Bin Editor](docs/screenshots/bin-editor.png) |

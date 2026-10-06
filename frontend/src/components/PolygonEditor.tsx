@@ -8,6 +8,13 @@ import { useHistory } from '@/hooks/useHistory'
 import { ZOOM_FACTOR } from '@/lib/constants'
 import { clampZoom, zoomedViewBox, viewBoxPoint, zoomAtCursor, uiScaleFor } from '@/lib/viewbox'
 
+/** A caller-supplied toolbar action whose result joins the editor's own undo history. */
+export interface PolygonEditorAction {
+  label: string
+  /** Return the next polygon list, or null to do nothing. */
+  create: (polygons: Polygon[]) => Polygon[] | null
+}
+
 interface Props {
   imageUrl: string
   polygons: Polygon[]
@@ -17,6 +24,10 @@ interface Props {
   onIncludedChange?: (ids: Set<string>) => void
   hovered?: string | null
   onHoveredChange?: (id: string | null) => void
+  /** Extra toolbar actions; their results are pushed onto the same history. */
+  actions?: PolygonEditorAction[]
+  /** Polygon ids that cannot be deleted (e.g. a required outer boundary). */
+  lockedIds?: string[]
 }
 // dark halo painted under outlines so they stay legible over photographs
 const HALO_STROKE = 'rgba(2, 6, 23, 0.55)'
@@ -36,9 +47,12 @@ export function PolygonEditor({
   onIncludedChange,
   hovered,
   onHoveredChange,
+  actions = [],
+  lockedIds = [],
 }: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const svgRef = useRef<SVGSVGElement>(null)
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 })
   const [fitted, setFitted] = useState({ width: 0, height: 0 })
   const [zoom, setZoom] = useState(1)
@@ -117,10 +131,19 @@ export function PolygonEditor({
 
   const getScaledPoint = useCallback(
     (clientX: number, clientY: number): Point => {
-      if (!containerRef.current) return { x: 0, y: 0 }
-
-      const rect = containerRef.current.getBoundingClientRect()
-      const point = viewBoxPoint(vb, (clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height)
+      // the svg's own CTM already folds in preserveAspectRatio letterboxing, the
+      // container's rounded size and zoom/pan, so the pointer cannot drift from
+      // the rendered outline the way a rect-fraction mapping can
+      const ctm = svgRef.current?.getScreenCTM()
+      let point: Point
+      if (ctm) {
+        point = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse())
+      } else if (containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect()
+        point = viewBoxPoint(vb, (clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height)
+      } else {
+        return { x: 0, y: 0 }
+      }
 
       return {
         x: Math.max(0, Math.min(imageSize.width, point.x)),
@@ -368,6 +391,7 @@ export function PolygonEditor({
   }
 
   const handleDeletePolygon = (id: string) => {
+    if (lockedIds.includes(id)) return
     updatePolygons(polygons.filter((p) => p.id !== id))
     if (activeId === id) setActiveId(null)
     if (hasInclusion && onIncludedChange) {
@@ -457,6 +481,21 @@ export function PolygonEditor({
             </button>
           </div>
 
+          {actions.map(action => (
+            <button
+              key={action.label}
+              type="button"
+              onClick={() => {
+                const next = action.create(polygons)
+                if (next) updatePolygons(next)
+              }}
+              className="btn-secondary px-2 py-1 text-[11px]"
+              title={action.label}
+            >
+              {action.label}
+            </button>
+          ))}
+
           <span className="text-sm text-text-muted">
             {(editMode === 'select' || editMode === 'vertex') && !activeId && 'Click outlines to select tools'}
             {(editMode === 'select' || editMode === 'vertex') && activeId && 'Drag vertices to adjust the outline'}
@@ -486,6 +525,7 @@ export function PolygonEditor({
           onMouseDownCapture={() => { didPanRef.current = false }}
         >
         <svg
+          ref={svgRef}
           className={`absolute inset-0 w-full h-full ${dragging?.type === 'pan' ? 'pointer-events-none' : ''}`}
           viewBox={`${vb.x} ${vb.y} ${vb.w} ${vb.h}`}
         >

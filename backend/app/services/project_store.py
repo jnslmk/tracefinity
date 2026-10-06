@@ -73,15 +73,27 @@ class ProjectStore:
             # check before mutating so a refused write cannot leave a
             # phantom record in memory
             self.ensure_open()
+            previous = self._projects.get(project_id)
             self._projects[project_id] = project
-            self._save()
+            try:
+                self._save()
+            except Exception:
+                if previous is None:
+                    self._projects.pop(project_id, None)
+                else:
+                    self._projects[project_id] = previous
+                raise
 
     def delete(self, project_id: str) -> Optional[BinProject]:
         with self._lock:
             self.ensure_open()
             project = self._projects.pop(project_id, None)
             if project:
-                self._save()
+                try:
+                    self._save()
+                except Exception:
+                    self._projects[project_id] = project
+                    raise
             return project
 
     def all(self) -> dict[str, BinProject]:

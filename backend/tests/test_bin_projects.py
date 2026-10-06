@@ -1,3 +1,5 @@
+import math
+
 import manifold3d as mf
 import pytest
 import trimesh
@@ -354,8 +356,9 @@ def test_project_bin_placement_validates_grid_offsets():
     assert placement.id
     with pytest.raises(ValidationError):
         ProjectBinPlacement(bin_id="bin-1", x=0.3)
+    assert ProjectBinPlacement(bin_id="bin-1", x=-1, y=42).x == -1
     with pytest.raises(ValidationError):
-        ProjectBinPlacement(bin_id="bin-1", x=-1)
+        ProjectBinPlacement(bin_id="bin-1", x=float("inf"))
     with pytest.raises(ValidationError):
         ProjectBinPlacement(bin_id="bin-1", rotation=45)
 
@@ -1083,3 +1086,94 @@ def test_raised_rotated_stack_ceiling_boundary_matches_printed_contact(tmp_path,
     final = client.post(url + "/assessment", json={}).json()
     assert final["status"] == status
     assert final["stacks"][0]["headroom_mm"] == pytest.approx(offset, abs=1e-5)
+
+
+def test_photo_boundary_drives_containment_free_space_and_clearance(tmp_path, monkeypatch):
+    client = _api_client(tmp_path, monkeypatch)
+    project = client.post("/api/bin-projects", json={"name": "Top drawer"}).json()
+    bin_data = client.post("/api/bins", json={
+        "name": "Bin A",
+        "project_id": project["id"],
+        "bin_config": {"grid_x": 1, "grid_y": 1, "height_units": 4, "magnets": False},
+    }).json()
+    sketch = client.post(f"/api/bin-projects/{project['id']}/sketches", json={
+        "name": "Photo plan",
+        "container_width_mm": 84,
+        "container_depth_mm": 84,
+        "container_height_mm": 70,
+    }).json()
+    url = f"/api/bin-projects/{project['id']}/sketches/{sketch['id']}"
+
+    # the boundary reaches past the grid but excludes the bottom-right quadrant
+    outline = {
+        "points": [
+            {"x": -5, "y": -5}, {"x": 89, "y": -5}, {"x": 89, "y": 50},
+            {"x": 50, "y": 50}, {"x": 50, "y": 89}, {"x": -5, "y": 89},
+        ],
+        "interior_rings": [],
+    }
+    inside = [{"id": "inside", "bin_id": bin_data["id"], "x": 0, "y": 0}]
+    assert client.patch(url, json={"outline": outline, "bin_layout": inside}).status_code == 200
+
+    result = client.post(url + "/assessment", json={}).json()
+    assert result["status"] == "verified", result
+    assert result["floor_area_units"] == pytest.approx(7315 / (42 * 42), rel=1e-4)
+    # 21mm half-cells: rows y in [0,21) and [21,42) are 4 cells wide, rows
+    # [42,63) and [63,84) only 2 (the missing quadrant), so 12 cells = 3.0 units
+    assert result["usable_area_units"] == pytest.approx(3.0)
+    assert not any(cell["x"] >= 1 and cell["y"] >= 1 for cell in result["free_cells"])
+
+    # the missing quadrant is not floor even though the rectangle is wide enough
+    outside = [{"id": "outside", "bin_id": bin_data["id"], "x": 1, "y": 1}]
+    outside_result = client.post(url + "/assessment", json={"bin_layout": outside}).json()
+    assert any(v["code"] == "boundary" for v in outside_result["violations"])
+
+    # a footprint nearer the boundary than the fit clearance is not covered
+    clearance_result = client.post(url + "/assessment", json={"fit_clearance_mm": 10}).json()
+    assert any(v["code"] == "boundary" for v in clearance_result["violations"])
+
+    # clearing the boundary restores the rectangular rule
+    cleared = client.patch(url, json={"outline": None, "fit_clearance_mm": 0}).json()
+    assert cleared["outline"] is None
+    rectangular = client.post(url + "/assessment", json={"bin_layout": outside}).json()
+    assert not any(v["code"] == "boundary" for v in rectangular["violations"])
+
+
+@pytest.mark.parametrize("rotation,origin,local_floor,position", [
+    (0, (0, 0), [(0, 0), (84, 0), (84, 84), (0, 84)], (0, 0)),
+    (30, (63, 42), [(-42, -21), (42, -21), (42, 63), (-42, 63)], (-1, 0)),
+])
+def test_photo_floor_capacity_and_placements_ignore_the_legacy_rectangle(tmp_path, monkeypatch, rotation, origin, local_floor, position):
+    client = _api_client(tmp_path, monkeypatch)
+    project = client.post("/api/bin-projects", json={"name": "Floor authority"}).json()
+    bin_data = client.post("/api/bins", json={
+        "name": "Wide bin", "project_id": project["id"],
+        "bin_config": {"grid_x": 2, "grid_y": 1, "height_units": 4, "magnets": False},
+    }).json()
+    angle = math.radians(rotation)
+    points = [{"x": origin[0] + x * math.cos(angle) - y * math.sin(angle),
+               "y": origin[1] + x * math.sin(angle) + y * math.cos(angle)} for x, y in local_floor]
+    sketch = client.post(f"/api/bin-projects/{project['id']}/sketches", json={
+        "target_grid_x": 1, "target_grid_y": 1,
+        "outline": {"points": points, "interior_rings": []},
+        "grid_alignment": {"origin_x_mm": origin[0], "origin_y_mm": origin[1], "rotation_deg": rotation},
+        "container_height_mm": 70,
+    }).json()
+    url = f"/api/bin-projects/{project['id']}/sketches/{sketch['id']}"
+    accepted = client.patch(url, json={"bin_layout": [
+        {"id": "wide", "bin_id": bin_data["id"], "x": position[0], "y": position[1]},
+    ]})
+    assert accepted.status_code == 200
+    routes._project_store_cache.clear()
+    assert client.get(f"/api/bin-projects/{project['id']}").json()["sketches"][0]["bin_layout"][0]["x"] == position[0]
+    result = client.post(url + "/assessment", json={}).json()
+    assert not any(v["code"] == "boundary" for v in result["violations"])
+    assert result["usable_area_units"] == pytest.approx(4)
+    assert result["occupied_floor_units"] == pytest.approx(2)
+    assert len(result["free_cells"]) == 8
+    assert result["floor_area_units"] == pytest.approx(4)
+    if rotation:
+        assert min(cell["x"] for cell in result["free_cells"]) == -1
+        assert min(cell["y"] for cell in result["free_cells"]) == -.5
+    rectangular = client.post(url + "/assessment", json={"outline": None}).json()
+    assert any(v["code"] == "boundary" for v in rectangular["violations"])

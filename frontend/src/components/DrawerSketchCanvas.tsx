@@ -1,15 +1,17 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import type { BinSummary, ProjectBinPlacement, ToolboxAssessment } from '@/types'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import type { BinSummary, DrawerOutline, Point, ProjectBinPlacement, ToolboxAssessment } from '@/types'
 import { GRID_UNIT } from '@/lib/constants'
 import { polygonPathData } from '@/lib/svg'
+import { footprintCorners, toGridLocal } from '@/lib/drawerOutline'
 import {
   DEFAULT_BIN_COLOR,
   binFootprint,
   binPointToDrawerMm,
   clampToDrawer,
   gridLines,
+  drawerGridBounds,
   placementRect,
   snapForBin,
   snapUnits,
@@ -29,6 +31,15 @@ interface Props {
   onMove: (placementId: string, x: number, y: number) => void
   onDropBin: (binId: string, x: number, y: number) => void
   assessment?: ToolboxAssessment | null
+  /** Measured floor boundary in drawer millimetres; absent draws the rectangle. */
+  outline?: DrawerOutline | null
+  /** Grid frame anchored at this drawer-space origin. */
+  gridOriginMm?: Point
+  /** Grid turn about its origin, degrees clockwise. */
+  gridRotationDeg?: number
+  /** Corrected source photo, drawn in drawer space so alignment is visible. */
+  sourceImage?: { url: string; widthMm: number; heightMm: number } | null
+  showSource?: boolean
 }
 
 interface DragState {
@@ -116,23 +127,66 @@ export function DrawerSketchCanvas({
   onMove,
   onDropBin,
   assessment,
+  outline = null,
+  gridOriginMm = { x: 0, y: 0 },
+  gridRotationDeg = 0,
+  sourceImage = null,
+  showSource = false,
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null)
   const [drag, setDrag] = useState<DragState | null>(null)
   const [dropHint, setDropHint] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
+  // useId can contain ':' which is unsafe inside a url(#...) reference
+  const clipId = `drawer-floor-clip-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`
 
+  const footprint = useMemo(() => ({
+    outline, originXmm: gridOriginMm.x, originYmm: gridOriginMm.y,
+    rotationDeg: gridRotationDeg, fitClearanceMm: 0,
+  }), [outline, gridOriginMm.x, gridOriginMm.y, gridRotationDeg])
+  const bounds = useMemo(() => drawerGridBounds(drawerX, drawerY, footprint), [drawerX, drawerY, footprint])
   const drawerWidthMm = drawerX * GRID_UNIT
   const drawerHeightMm = drawerY * GRID_UNIT
-  const pad = Math.max(drawerWidthMm, drawerHeightMm) * 0.04
+  const pad = Math.max(bounds.x1 - bounds.x0, bounds.y1 - bounds.y0) * GRID_UNIT * 0.04
 
-  // pointer position in grid units, using the live SVG transform
+  const outlinePath = outline ? polygonPathData(outline.points, outline.interior_rings) : null
+  const gridTransform = `translate(${gridOriginMm.x} ${gridOriginMm.y}) rotate(${gridRotationDeg})`
+  // shift the boundary into grid space for the clip path: clipPath children
+  // resolve in the referencing element's (translated and turned) user space
+  const shiftedOutlinePath = outline
+    ? polygonPathData(
+      outline.points.map(p => toGridLocal(p, gridOriginMm, gridRotationDeg)),
+      outline.interior_rings.map(ring => ring.map(p => toGridLocal(p, gridOriginMm, gridRotationDeg))),
+    )
+    : null
+
+  // Frame the actual floor in drawer space, independent of the legacy rectangle.
+  const view = (() => {
+    let minX = Infinity
+    let minY = Infinity
+    let maxX = -Infinity
+    let maxY = -Infinity
+    const include = (x: number, y: number) => {
+      minX = Math.min(minX, x - pad)
+      minY = Math.min(minY, y - pad)
+      maxX = Math.max(maxX, x + pad)
+      maxY = Math.max(maxY, y + pad)
+    }
+    for (const corner of footprintCorners(gridOriginMm, gridRotationDeg, bounds.x0, bounds.y0, bounds.x1 - bounds.x0, bounds.y1 - bounds.y0)) {
+      include(corner.x, corner.y)
+    }
+    for (const p of outline?.points ?? []) include(p.x, p.y)
+    return `${minX} ${minY} ${maxX - minX} ${maxY - minY}`
+  })()
+
+  // pointer position in grid units, using the live SVG transform and the grid frame
   const toUnits = useCallback((clientX: number, clientY: number) => {
     const svg = svgRef.current
     const ctm = svg?.getScreenCTM()
     if (!svg || !ctm) return null
     const point = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse())
-    return { x: point.x / GRID_UNIT, y: point.y / GRID_UNIT }
-  }, [])
+    const local = toGridLocal({ x: point.x, y: point.y }, gridOriginMm, gridRotationDeg)
+    return { x: local.x / GRID_UNIT, y: local.y / GRID_UNIT }
+  }, [gridOriginMm, gridRotationDeg])
 
   const moveRef = useRef(onMove)
   useEffect(() => { moveRef.current = onMove }, [onMove])
@@ -153,6 +207,7 @@ export function DrawerSketchCanvas({
         drawerX,
         drawerY,
         snap,
+        footprint,
       )
       moveRef.current(drag.placementId, snapped.x, snapped.y)
     }
@@ -167,7 +222,7 @@ export function DrawerSketchCanvas({
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [drag, bins, placements, drawerX, drawerY, toUnits])
+  }, [drag, bins, placements, drawerX, drawerY, toUnits, footprint])
 
   function handleBinMouseDown(placement: ProjectBinPlacement) {
     return (e: React.MouseEvent) => {
@@ -204,6 +259,7 @@ export function DrawerSketchCanvas({
       drawerX,
       drawerY,
       snap,
+      footprint,
     )
     onDropBin(binId, spot.x, spot.y)
   }
@@ -218,44 +274,79 @@ export function DrawerSketchCanvas({
     >
       <svg
         ref={svgRef}
-        viewBox={`${-pad} ${-pad} ${drawerWidthMm + pad * 2} ${drawerHeightMm + pad * 2}`}
+        viewBox={view}
         preserveAspectRatio="xMidYMid meet"
         className="max-w-full max-h-full w-full h-full"
         onClick={() => onSelect(null)}
       >
-        <rect
-          x={0} y={0}
-          width={drawerWidthMm} height={drawerHeightMm}
-          fill="var(--color-inset)"
-          stroke="var(--color-border-subtle)"
-          strokeWidth={1.5}
-          rx={2}
-        />
+        <defs>
+          {shiftedOutlinePath && (
+            <clipPath id={clipId}>
+              <path d={shiftedOutlinePath} clipRule="evenodd" />
+            </clipPath>
+          )}
+        </defs>
 
-        {assessment?.free_cells.map(cell => <rect key={`${cell.x}/${cell.y}`} x={cell.x * GRID_UNIT} y={cell.y * GRID_UNIT}
-          width={cell.w * GRID_UNIT} height={cell.h * GRID_UNIT} fill="var(--color-accent)" fillOpacity=".06" stroke="var(--color-border-subtle)" strokeWidth=".3" className="pointer-events-none" />)}
-        {assessment?.grid_x != null && assessment.residual_width_mm != null && assessment.residual_width_mm > 0 && <rect x={assessment.grid_x * GRID_UNIT} y="0"
-          width={assessment.residual_width_mm} height={drawerHeightMm} fill="var(--color-text-muted)" fillOpacity=".25"><title>Residual edge strip, not a usable grid cell</title></rect>}
-        {assessment?.grid_y != null && assessment.residual_depth_mm != null && assessment.residual_depth_mm > 0 && <rect x="0" y={assessment.grid_y * GRID_UNIT}
-          width={drawerWidthMm} height={assessment.residual_depth_mm} fill="var(--color-text-muted)" fillOpacity=".25"><title>Residual edge strip, not a usable grid cell</title></rect>}
-        {gridLines(drawerX).map(unit => (
-          <line
-            key={`v${unit}`}
-            x1={unit * GRID_UNIT} y1={0}
-            x2={unit * GRID_UNIT} y2={drawerHeightMm}
-            stroke="var(--color-bin-preview-grid)" strokeWidth={Number.isInteger(unit) ? 0.6 : 1.2}
-            strokeDasharray={Number.isInteger(unit) ? undefined : '6,3'}
+        {showSource && sourceImage && (
+          <image
+            href={sourceImage.url}
+            x={0} y={0}
+            width={sourceImage.widthMm} height={sourceImage.heightMm}
+            preserveAspectRatio="none"
+            opacity={0.4}
+            className="pointer-events-none"
           />
-        ))}
-        {gridLines(drawerY).map(unit => (
-          <line
-            key={`h${unit}`}
-            x1={0} y1={unit * GRID_UNIT}
-            x2={drawerWidthMm} y2={unit * GRID_UNIT}
-            stroke="var(--color-bin-preview-grid)" strokeWidth={Number.isInteger(unit) ? 0.6 : 1.2}
-            strokeDasharray={Number.isInteger(unit) ? undefined : '6,3'}
+        )}
+
+        {/* The measured floor is authoritative; rectangular plans keep their old floor. */}
+        {outlinePath && (
+          <path
+            d={outlinePath}
+            fillRule="evenodd"
+            fill="var(--color-inset)"
+            fillOpacity={showSource && sourceImage ? 0 : 1}
+            stroke="var(--color-border)"
+            strokeWidth={1.5}
+            className="pointer-events-none"
           />
-        ))}
+        )}
+
+        <g transform={gridTransform}>
+          {!outlinePath && <rect
+            x={0} y={0}
+            width={drawerWidthMm} height={drawerHeightMm}
+            fill="var(--color-inset)"
+            stroke="var(--color-border-subtle)"
+            strokeWidth={1.5}
+            rx={2}
+          />}
+
+          {assessment?.free_cells.map(cell => <rect key={`${cell.x}/${cell.y}`} x={cell.x * GRID_UNIT} y={cell.y * GRID_UNIT}
+            width={cell.w * GRID_UNIT} height={cell.h * GRID_UNIT} fill="var(--color-accent)" fillOpacity=".06" stroke="var(--color-border-subtle)" strokeWidth=".3" className="pointer-events-none" />)}
+          {assessment?.grid_x != null && assessment.residual_width_mm != null && assessment.residual_width_mm > 0 && <rect x={assessment.grid_x * GRID_UNIT} y="0"
+            width={assessment.residual_width_mm} height={drawerHeightMm} fill="var(--color-text-muted)" fillOpacity=".25"><title>Residual edge strip, not a usable grid cell</title></rect>}
+          {assessment?.grid_y != null && assessment.residual_depth_mm != null && assessment.residual_depth_mm > 0 && <rect x="0" y={assessment.grid_y * GRID_UNIT}
+            width={drawerWidthMm} height={assessment.residual_depth_mm} fill="var(--color-text-muted)" fillOpacity=".25"><title>Residual edge strip, not a usable grid cell</title></rect>}
+          <g clipPath={shiftedOutlinePath ? `url(#${clipId})` : undefined}>
+            {gridLines(bounds.x1, bounds.x0).map(unit => (
+              <line
+                key={`v${unit}`}
+                x1={unit * GRID_UNIT} y1={bounds.y0 * GRID_UNIT}
+                x2={unit * GRID_UNIT} y2={bounds.y1 * GRID_UNIT}
+                stroke="var(--color-bin-preview-grid)" strokeWidth={Number.isInteger(unit) ? 0.6 : 1.2}
+                strokeDasharray={Number.isInteger(unit) ? undefined : '6,3'}
+              />
+            ))}
+            {gridLines(bounds.y1, bounds.y0).map(unit => (
+              <line
+                key={`h${unit}`}
+                x1={bounds.x0 * GRID_UNIT} y1={unit * GRID_UNIT}
+                x2={bounds.x1 * GRID_UNIT} y2={unit * GRID_UNIT}
+                stroke="var(--color-bin-preview-grid)" strokeWidth={Number.isInteger(unit) ? 0.6 : 1.2}
+                strokeDasharray={Number.isInteger(unit) ? undefined : '6,3'}
+              />
+            ))}
+          </g>
 
         {placements.map(placement => {
           const bin = bins.get(placement.bin_id)
@@ -354,6 +445,7 @@ export function DrawerSketchCanvas({
             className="pointer-events-none"
           />
         )}
+        </g>
       </svg>
     </div>
   )

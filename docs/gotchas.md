@@ -60,6 +60,48 @@ mesh booleans were measured at 10-100x faster for this workload. See
 - Packing runs inside the request handler: keep CPU-bound endpoints off the event loop (declare `def` so FastAPI uses its threadpool, or wrap in `asyncio.to_thread`). A blocked loop does not fail cleanly — the dev proxy dies with `socket hang up`/ECONNRESET and the feature looks broken rather than slow.
 - Threadpool execution keeps the event loop responsive but does not prevent proxy timeouts. Auto-layout must discard candidates whose best possible score cannot beat an existing placement **before** translating or clipping polygons. Seed refinement with the screened contact placement; keep outside-area scoring for overflow layouts when no inside placement exists.
 
+## Drawer boundary containment
+
+A photo-derived drawer boundary is a polygon with exclusions, not a rectangle.
+Test the **whole nominal footprint** for coverage: corners inside are not
+sufficient when a notch or exclusion crosses an edge, or when the footprint
+coincides with a hole. Harmless corner/shared-edge contact is allowed at zero
+clearance. For positive clearance, require the minimum **Euclidean segment
+distance** to all outer/exclusion edges to be at least that gap. Decide the
+interior side of a shared exclusion edge from the ring's own winding, never from
+the exclusion's area centroid: a concave (e.g. U-shaped) exclusion can wrap around
+the footprint so its centroid lands inside the footprint while the shared edges are
+still harmless contact. Do not grow a rectangle in its own axes (a diagonal gap
+differs), shrink it, or weaken contact rules to hide a scan bug. `drawer_outline.py`
+and `drawerOutline.ts` mirror this rule and must remain in step.
+
+The boundary lives in drawer-space millimetres anchored at the corrected photo origin; the grid frame (`grid_alignment`) has its own anchor and turn, so the grid can follow a straight drawer edge that is not parallel to the reference paper while the boundary and photo stay put. A placement mm footprint is therefore `origin + R(rotation) · (unit · 42)`; containment tests its four rotated corners plus edge crossings, not an axis-aligned rectangle. Frontend and backend must share the rotation sense (positive turns clockwise in y-down drawer space; three.js uses the negated angle about Y because drawer y maps to z).
+
+Transform the real outer ring into the current grid frame to derive scan/render
+bounds; these may include negative coordinates. The old rectangular display
+dimensions must not limit photo-plan packing, clamps, half-cell statistics or
+either grid view. Bounds are only an iteration extent: containment still decides
+each usable footprint/cell, including holes and concavity crossings.
+
+Lattice outputs canonicalize signed zero to `0`, including snapping, clamps and
+grid lines. This must not clamp negative coordinates away: real negative full/
+half-cells remain usable in an offset or turned photo grid.
+
+A saved plan owns versioned normalized original/corrected photos. Boundary-only
+Accept must omit the historical session ID; source adoption uses only a pending
+replacement/recalibration session. Never overwrite the currently referenced
+images before the matching metadata commits. Dispose of the superseded copies only
+after that commit and as a best-effort step: a filesystem error while removing them
+must not fail an already-committed replacement or touch the newly referenced images.
+A session candidate mask belongs to the session, a saved-source candidate to the
+plan; deletion cleans only its owner. Seed inclusion alone is not semantic evidence
+of floor: an exterior polygon can also enclose the selected point; a real proposal
+may follow the case walls, rim or exterior, so inspect and correct it (or trace
+locally) before accepting. Inspect the native provider mask, not just the contour
+or bounding box, before accepting.
+
+A stored outline that fails validation (only possible if hand-edited) falls back to the rectangular bounds and is reported as unresolved, rather than crashing the assessment.
+
 ## AVX / ONNX requirement
 
 U2-Net paper detection and all local tracers (`isnet`, `birefnet-lite`, `inspyrenet`) require ONNX Runtime, which needs AVX CPU instructions. On non-AVX CPUs (some older VMs, Atoms), ONNX is disabled at startup and paper detection falls back to OpenCV-only brightness thresholding -- less accurate, may need manual corner adjustment. Local tracers won't load; use a remote tracer (`gemini`, `replicate`, `fal`).

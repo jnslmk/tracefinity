@@ -318,8 +318,9 @@ bypass this queue.
 - `POST /api/bin-projects/{id}/create-bin` - create a new bin from selected project tools, using project or request bin defaults
 - `GET /api/bin-projects/{id}/health` - report project/tool/bin link mismatches
 - `POST /api/bin-projects/{id}/repair` - repair safe project/tool/bin link mismatches
-- `POST /api/bin-projects/{id}/sketches` - add a drawer plan (optional `name`, `target_grid_x`, `target_grid_y`)
-- `PATCH /api/bin-projects/{id}/sketches/{sketch_id}` - update a plan's name, drawer grid or `bin_layout`
+- `POST /api/bin-projects/{id}/sketches` - add a drawer plan (optional `name`, `target_grid_x`, `target_grid_y`, `outline`, `grid_alignment`, `fit_clearance_mm`, and `source_session_id`/`source_seed` to start from a calibrated photo)
+- `PATCH /api/bin-projects/{id}/sketches/{sketch_id}` - update a plan's name, drawer grid, `bin_layout`, `outline`, `grid_alignment`, `fit_clearance_mm`, `source_session_id`/`source_seed`
+- `POST /api/bin-projects/{id}/sketches/outline/candidate` - propose the interior floor around a selected point (`{session_id, seed, provider?, api_key?, tracer?}`) through the configured Gemini/OpenRouter provider; returns the boundary in millimetres and persists nothing. The proposal is a starting point, not a verdict: it may follow the case walls, rim or exterior, so review and edit it, or trace the boundary locally instead
 - `DELETE /api/bin-projects/{id}/sketches/{sketch_id}` - delete a plan; bins and tools are untouched
 - `POST /api/bin-projects/{id}/sketches/{sketch_id}/assessment` - derived physical fit and capacity; optionally assess a `ProjectSketchUpdateRequest` draft without saving
 - `POST /api/bin-projects/{id}/sketches/{sketch_id}/placements/{placement_id}/stack-action` - explicitly stack, reorder or remove members
@@ -333,6 +334,63 @@ supporting surface beneath the lowest bin bases; subtract installed baseplate or
 liner elevation from measured floor-to-closed-lid height. Millimetre dimensions
 override grid controls per axis. Clearing them preserves placements and restores
 the saved grid-only limits. Residual edge strips are not rounded up into grid cells.
+
+A plan may also carry an optional photo-derived boundary: `outline`
+(`{points, interior_rings}`, millimetres in drawer space with x right and y down),
+`source` (the calibration: historical `session_id`, plan-owned `original_image_url`
+and `corrected_image_url`, corrected image size, `paper_size`, `scale_factor`
+millimetres per pixel, original-frame paper `corners` and selected `seed`),
+`grid_alignment` (`origin_x_mm`, `origin_y_mm`, `rotation_deg`,
+all default zero) and a finite non-negative `fit_clearance_mm` (default zero),
+which is separate from the vertical `safety_clearance_mm`. Every field is optional
+with defaults, so records written before the feature load unchanged. The source is
+derived server-side from a session the caller owns — never sent by the client — and
+`source_session_id` (with an optional `source_seed`) adopts a pending source on
+create/update. Omit it when accepting edits to an unchanged owned source: the
+historical session can already be deleted. Recalibration reopens the saved
+uncorrected original with its paper corners/size via upload and corner editing.
+Both recalibration and a replacement photo are traced in their pending session's
+metric frame, then adopted only on explicit Accept. Validated images are staged at
+new owned addresses before committing matching metadata; failure removes them and
+leaves the old source/outline/calibration usable. A committed replacement returns
+the new source; disposal of the obsolete copies runs after that commit, so a
+filesystem error while removing them is logged and leaves an unreferenced leftover
+rather than failing the committed request or touching the new images. Deleting a
+plan/project removes only its owned photos. Session candidates belong to the
+session; saved-source candidates belong to the plan and are removed with that owner.
+Reviewing a candidate never creates a plan.
+
+`grid_alignment` is the grid's own frame: an anchor plus a turn. The turn aligns the
+grid to a straight drawer edge that is not parallel to the reference paper, and the
+boundary and source photo stay in drawer millimetres, so the two are independent.
+A placement footprint is therefore a rectangle in that turned frame; its four
+corners and all intervening edges are tested for coverage, and half/full-unit snaps
+and cardinal rotations are unchanged inside the frame. Scan/render bounds are
+derived from the actual floor in that current frame, not the legacy rectangle.
+Placement coordinates are finite signed half-unit offsets, so an offset/turned
+grid can use negative cells and bins larger than the old display rectangle.
+
+The boundary is authoritative for containment: the whole nominal footprint must be
+covered by the outline minus its exclusions, and its minimum **Euclidean** distance
+to every outer/exclusion edge must be at least `fit_clearance_mm`. It is not a
+per-axis rectangle expansion. Corners inside are not sufficient — a concave notch
+or exclusion can cross the footprint. Harmless corner/shared-edge contact is valid
+at zero clearance, but a footprint coinciding with an exclusion is not floor. The
+bounding box only supplies scan/render bounds, never containment. An invalid
+outline (fewer than three points, zero area, self-crossing, exclusions outside,
+crossing, overlapping or nested) is rejected atomically with 400.
+
+`outline/candidate` returns a provider proposal in millimetres. The provider sees
+the full corrected scene, not a seed-centred crop. A small red cross marks the
+selected floor point on the provider-input copy, with matching prepared pixel
+coordinates in the prompt; neither saved source image is annotated. The cross is
+only a selection cue, never a boundary or an obstruction. The prompt asks for white
+usable floor (including under paper), black walls/rim/case/lid/latches/obstructions.
+Before contouring, the mask is inverted and mapped back to the full corrected frame.
+Seed containment rejects disconnected candidates or a seed inside an exclusion;
+it cannot distinguish an enclosing case exterior from real floor. The user must
+review the native proposal and outline before Accept; a photo cannot verify
+physical fit. With no configured provider, trace locally over the corrected photo.
 
 Placements add nullable `support_id`, referencing another placement in the **same
 plan**, not a bin ID. Copies retain independent identity. A placement supports at
@@ -364,6 +422,11 @@ measurements and every required support check.
 
 Capacity includes floor-root footprint union, free half-grid cells, connected free
 regions, usable grid dimensions, residual edge strips and each stack's headroom.
+With a boundary present, free cells and free regions are restricted to half-cells
+fully covered by it, `usable_area_units` is their total, `floor_area_units` is the
+continuous boundary area, and residual strips are omitted because the grid extent
+is no longer the floor. All of it uses the same containment rule as the warnings,
+and automatic packing never chooses a spot the boundary rejects.
 Tools in bins merely linked to the project do not complete this plan.
 `geometry_revision` is a transient preview invalidation key, not a stored fit cache.
 Only user inputs and relationships persist; assessments use current tools/bins.

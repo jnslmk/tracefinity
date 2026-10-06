@@ -54,6 +54,24 @@ The output must look like a stencil — solid black shapes on a solid white rect
 Output dimensions must be exactly {width}x{height} pixels. Tool positions must match the input photo."""
 
 
+# the drawer-floor candidate marks the floor itself, not the objects: the model
+# was measured to mask most reliably with WHITE empty interior floor against a
+# BLACK case, so the mask is inverted before contouring (dark = foreground).
+# a sheet of paper lying on the floor is floor, so it stays white with the floor.
+DRAWER_FLOOR_PROMPT = """Look at this photo of an open drawer and separate the empty floor space inside it from everything else.
+
+CRITICAL: The output image MUST be EXACTLY {width}x{height} pixels - the same size as the input, with the same framing.
+
+- WHITE (#FFFFFF): the whole empty floor inside the drawer where bins could sit. The floor continues past the sheet on every side, so the sheet is only a part of it: include the floor beside and beyond the paper, and include the floor the sheet covers. Do not mark the sheet alone.
+- BLACK (#000000): everything that is not that floor: the drawer walls and their inner faces, the case and its body, the surrounding bench or table, everything outside the drawer, and every obstruction on the floor such as a boss, rib, runner, hinge, latch, handle or screw head.
+- Never mark the area outside the drawer's inner walls white; that area is black.
+- The white region must be one connected shape following the real inner wall edges, including any concavity, and must not include the wall thickness.
+- Follow the junction where the horizontal floor meets the inner walls, NOT the top rim or the outer case silhouette. An open lid above the floor and latches projecting in front of it are black, not extensions of the floor.
+- Sharp, clean edges, flat white on flat black, no grey, no gradients, no textures, no text.
+
+Output a {width}x{height} pixel mask image only."""
+
+
 LABEL_PROMPT = """This image shows tools on a white background. There are {count} tools detected.
 For each tool, identify what it is.
 
@@ -185,6 +203,14 @@ class AITracer:
             return MASK_PROMPT_FLASH.format(width=width, height=height)
         return MASK_PROMPT_PRO.format(width=width, height=height)
 
+    def _effective_image_model(self) -> str:
+        """The image model actually called: the OpenRouter slug when that key is set."""
+        return self.openrouter_image_model if self.openrouter_key else self.model
+
+    def _needs_alignment(self) -> bool:
+        """Alignment depends on the model that produced the mask, not the google slug."""
+        return self._effective_image_model().rsplit("/", 1)[-1] in _NEEDS_ALIGNMENT
+
     async def trace_tools(
         self,
         image_path: str,
@@ -210,7 +236,7 @@ class AITracer:
         if not mask_path:
             return [], None
 
-        align = not self.uses_saliency and self.model in _NEEDS_ALIGNMENT
+        align = not self.uses_saliency and self._needs_alignment()
         contours = self._trace_mask(mask_path, image_path, align=align)
         if not contours:
             return [], mask_output_path
@@ -232,6 +258,106 @@ class AITracer:
             )
 
         return polygons, mask_output_path
+
+    async def trace_drawer_floor(
+        self,
+        image_path: str,
+        api_key: str,
+        mask_output_path: str | None = None,
+        before_mask_write: Callable[[], None] | None = None,
+        focus: tuple[float, float] | None = None,
+    ) -> tuple[Polygon | None, str | None]:
+        """propose the empty interior floor of a drawer as one polygon.
+
+        The model sees the full corrected scene, with the selected ``focus``
+        marked only on its input copy and described in prepared pixel coordinates.
+        The source photo stays unchanged; the mask maps back to its full frame.
+        Point containment cannot establish that the proposed region is truly floor:
+        the user must review it before accepting.
+        """
+        img = cv2.imread(image_path)
+        if img is None:
+            return None, None
+        full_h, full_w = img.shape[:2]
+        # Keep the surrounding scene: a seed-centred square loses context for
+        # distinguishing the horizontal floor from the paper, rim and open lid.
+        image_bytes, mime_type, _, req_w, req_h = self._prepare_image(image_path)
+        prompt = DRAWER_FLOOR_PROMPT.format(width=req_w, height=req_h)
+        if focus is not None:
+            selected_x = focus[0] * req_w / full_w
+            selected_y = focus[1] * req_h / full_h
+            provider_input = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+            cv2.drawMarker(
+                provider_input, (int(round(selected_x)), int(round(selected_y))), (0, 0, 255),
+                markerType=cv2.MARKER_CROSS, markerSize=17, thickness=2,
+            )
+            image_bytes = cv2.imencode(".png", provider_input)[1].tobytes()
+            mime_type = "image/png"
+            prompt += (
+                f"\nThe red cross marks the user's selected interior FLOOR at pixel "
+                f"x={selected_x:.1f}, y={selected_y:.1f} in this {req_w}x{req_h} input "
+                "(origin at top left, x right, y down). "
+                "The cross is only a selection annotation, not an obstruction or a boundary; "
+                "do not reproduce it in the mask. Mask the whole connected horizontal floor "
+                "containing its centre, including the floor under the paper and the annotation. "
+                "Do not mask the paper alone or the enclosing case, rim, vertical walls, open lid or front latches."
+            )
+        logging.info("generating drawer floor mask with %s", self._effective_image_model())
+
+        if self.openrouter_key:
+            mask_data = await self._mask_via_openrouter(image_bytes, mime_type, prompt)
+        else:
+            mask_data = await self._mask_via_google(image_bytes, mime_type, prompt, api_key)
+
+        if not mask_data:
+            return None, None
+
+        # the model marks the floor white against a black case; contouring treats
+        # dark as foreground, so invert (dropping any alpha) before it is traced
+        decoded = cv2.imdecode(np.frombuffer(mask_data, np.uint8), cv2.IMREAD_COLOR)
+        if decoded is None:
+            return None, None
+        inverted = cv2.bitwise_not(decoded)
+
+        full_mask = cv2.resize(inverted, (full_w, full_h), interpolation=cv2.INTER_NEAREST)
+        mask_data = cv2.imencode(".png", full_mask)[1].tobytes()
+
+        if mask_output_path:
+            if before_mask_write:
+                before_mask_write()
+            Path(mask_output_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(mask_output_path).write_bytes(mask_data)
+            mask_path = mask_output_path
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+                f.write(mask_data)
+                mask_path = f.name
+
+        align = self._needs_alignment()
+        try:
+            contours = self._trace_mask(mask_path, image_path, align=align)
+        finally:
+            if mask_output_path is None:
+                Path(mask_path).unlink(missing_ok=True)
+        if not contours:
+            return None, mask_output_path
+
+        exterior, holes = max(contours, key=lambda c: abs(self._ring_area(c[0])))
+        polygon = Polygon(
+            id=str(uuid.uuid4()),
+            points=[Point(x=p[0], y=p[1]) for p in exterior],
+            label="drawer floor",
+            interior_rings=[[Point(x=p[0], y=p[1]) for p in ring] for ring in holes],
+        )
+        return polygon, mask_output_path
+
+    @staticmethod
+    def _ring_area(points: list[tuple[float, float]]) -> float:
+        total = 0.0
+        for i, (x0, y0) in enumerate(points):
+            x1, y1 = points[(i + 1) % len(points)]
+            total += x0 * y1 - x1 * y0
+        return total / 2.0
 
     def _init_saliency_backend(self):
         """prepare the saliency backend: load local weights, or build a remote
@@ -443,7 +569,7 @@ class AITracer:
 
     MAX_MASK_DIM = 2048  # keep output in the 1K/2K pricing tier
 
-    def _prepare_image(self, image_path: str) -> tuple[bytes, str, str, int, int]:
+    def _prepare_image(self, image_path: str, prompt: str | None = None) -> tuple[bytes, str, str, int, int]:
         """read and optionally downscale image. returns (bytes, mime, prompt, w, h)."""
         img = cv2.imread(image_path)
         if img is None:
@@ -455,12 +581,12 @@ class AITracer:
             req_w, req_h = int(width * scale), int(height * scale)
             resized = cv2.resize(img, (req_w, req_h), interpolation=cv2.INTER_AREA)
             _, buf = cv2.imencode(".png", resized)
-            return buf.tobytes(), "image/png", self._mask_prompt(req_w, req_h), req_w, req_h
+            return buf.tobytes(), "image/png", prompt if prompt is not None else self._mask_prompt(req_w, req_h), req_w, req_h
 
         with open(image_path, "rb") as f:
             image_bytes = f.read()
         mime_type = self._get_media_type(image_path)
-        return image_bytes, mime_type, self._mask_prompt(width, height), width, height
+        return image_bytes, mime_type, prompt if prompt is not None else self._mask_prompt(width, height), width, height
 
     async def _generate_mask_gemini(
         self,
@@ -517,7 +643,7 @@ class AITracer:
             ],
         }
 
-        logging.info("generating mask with %s via openrouter", self.model)
+        logging.info("generating mask with %s via openrouter", self.openrouter_image_model)
 
         async def _call():
             async with httpx.AsyncClient(timeout=90) as client:

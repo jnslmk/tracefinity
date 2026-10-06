@@ -39,7 +39,7 @@ import {
   toolProjectLabel,
   type ProjectToolFilter,
 } from '@/lib/projectSelectors'
-import { AlertTriangle, ArrowLeft, CheckSquare, ChevronDown, ChevronRight, LayoutGrid, Loader2, Package, Plus, Search, Square, Trash2, Unlink } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Camera, CheckSquare, ChevronDown, ChevronRight, LayoutGrid, Loader2, Package, Plus, Search, Square, Trash2, Unlink } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/hooks/useTheme'
 
@@ -990,6 +990,13 @@ export default function ProjectPage() {
           onToggleCollapsed={() => setSectionCollapsed('sketches', !collapsedSections.sketches)}
         >
           <button
+            onClick={() => router.push(`/projects/${project.id}/sketch/photo`)}
+            className="btn-secondary px-2 py-1 text-[11px] inline-flex items-center gap-1"
+          >
+            <Camera className="w-3 h-3" />
+            From photo
+          </button>
+          <button
             onClick={handleCreateSketch}
             disabled={creatingSketch}
             className="btn-secondary px-2 py-1 text-[11px] inline-flex items-center gap-1"
@@ -1019,9 +1026,20 @@ export default function ProjectPage() {
                         {' · '}
                         {sketch.bin_layout.length} placement{sketch.bin_layout.length !== 1 ? 's' : ''}
                         {placedBinIds.size > 0 ? ` · ${placedBinIds.size} of ${projectBins.length} bins` : ''}
+                        {sketch.outline ? ' · photo boundary' : ''}
                       </span>
                     </button>
-                    <LayoutGrid className="w-4 h-4 text-text-muted flex-shrink-0" />
+                    {sketch.source ? (
+                      <button
+                        onClick={() => router.push(`/projects/${project.id}/sketch/photo?sketchId=${sketch.id}`)}
+                        className="text-text-muted hover:text-accent flex-shrink-0"
+                        title="Photo-derived boundary — edit the source photo or trace again"
+                      >
+                        <Camera className="w-4 h-4" />
+                      </button>
+                    ) : (
+                      <LayoutGrid className="w-4 h-4 text-text-muted flex-shrink-0" />
+                    )}
                     <button
                       onClick={() => requestSketchDelete(sketch.id)}
                       disabled={saving}
