@@ -225,7 +225,8 @@ export function DrawerPhotoWorkflow({ projectId, projectName, sketchId }: {
             ]} />
             <div>
               <h2 className="text-sm text-text-primary">Drag the handles to follow the inside floor.</h2>
-              <p className="text-[11px] text-text-secondary">Scroll to zoom, Space-drag to pan, toolbar adds vertices and obstructions.</p>
+              <p className="text-[11px] text-text-secondary">Choose Add vertex (+), then click an edge to insert a point. Select an obstruction and press Del to remove it. Undo restores edits.</p>
+              <p className="text-[11px] text-text-secondary">Scroll to zoom. Hold Space and drag to pan.</p>
             </div>
             <label className="block text-[11px] text-text-secondary">
               Container-fit clearance (mm)

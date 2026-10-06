@@ -243,6 +243,8 @@ export function PolygonEditor({
     if (!editable || editMode !== 'add-vertex') return
 
     const point = getScaledPoint(e.clientX, e.clientY)
+    setActiveId(polyId)
+    setInternalSelected(polyId)
     const updated = polygons.map((poly) => {
       if (poly.id !== polyId) return poly
       const points = [...poly.points]
@@ -393,16 +395,28 @@ export function PolygonEditor({
     setPan({ x: 0, y: 0 })
   }
 
-  const handleDeletePolygon = (id: string) => {
-    if (lockedIds.includes(id)) return
+  const handleDeletePolygon = useCallback((id: string) => {
+    if (!editable || lockedIds.includes(id)) return
     updatePolygons(polygons.filter((p) => p.id !== id))
     if (activeId === id) setActiveId(null)
+    if (internalSelected === id) setInternalSelected(null)
     if (hasInclusion && onIncludedChange) {
       const next = new Set(included!)
       next.delete(id)
       onIncludedChange(next)
     }
-  }
+  }, [editable, lockedIds, updatePolygons, polygons, activeId, internalSelected, hasInclusion, included, onIncludedChange])
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.key !== 'Delete' || !editable || !activeId || dragging || lockedIds.includes(activeId)) return
+      if (e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return
+      e.preventDefault()
+      handleDeletePolygon(activeId)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [editable, activeId, dragging, lockedIds, handleDeletePolygon])
 
   // auto-activate first included polygon when switching to edit modes
   const handleModeChange = (mode: EditMode) => {
@@ -490,7 +504,14 @@ export function PolygonEditor({
               type="button"
               onClick={() => {
                 const next = action.create(polygons)
-                if (next) updatePolygons(next)
+                if (!next) return
+                updatePolygons(next)
+                const selected = next.find(poly => !polygons.some(current => current.id === poly.id))
+                  ?? next.find(poly => poly.id === activeId)
+                  ?? next[0]
+                setActiveId(selected?.id ?? null)
+                setInternalSelected(selected?.id ?? null)
+                setEditMode('vertex')
               }}
               className="btn-secondary px-2 py-1 text-[11px]"
               title={action.label}
@@ -509,6 +530,7 @@ export function PolygonEditor({
           {activeId && !lockedIds.includes(activeId) && (
             <button
               onClick={() => handleDeletePolygon(activeId)}
+              title="Delete outline (Del)"
               className="ml-auto px-3 py-1.5 text-sm text-red-400 hover:bg-red-900/20 rounded border border-red-800 flex items-center gap-1 transition-colors cursor-pointer"
             >
               <Trash2 className="w-4 h-4" />
@@ -590,7 +612,7 @@ export function PolygonEditor({
                 />
 
                 {/* edge click targets for adding vertices */}
-                {isActive && editable && editMode === 'add-vertex' &&
+                {(isActive || !hasInclusion) && editable && editMode === 'add-vertex' &&
                   poly.points.map((point, idx) => {
                     const nextPoint = poly.points[(idx + 1) % poly.points.length]
                     const midX = (point.x + nextPoint.x) / 2
